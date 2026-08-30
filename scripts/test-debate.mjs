@@ -3,14 +3,19 @@
 //   export CLAUDE_API_KEY=你的key
 //   node scripts/test-debate.mjs
 //   node scripts/test-debate.mjs munger jobs beauvoir   （指定角色组合）
+//   DEBATE_QUESTION="哲学增加了还是减少了人生困惑？" node scripts/test-debate.mjs  （换题目）
+//   DEBATE_ROUNDS=3 node scripts/test-debate.mjs   （改标准轮数，默认4轮）
 //
 // 目的：不接UI、不接完整runDebate编排，只验证"人物卡+轮次机制"本身
 // 是否好玩、像本人、有没有AI腔。全部输出直接打印在终端。
 //
-// 本版本新增：私有记忆机制。每次发言模型必须同时产出
-// 【公开发言】（进入history，其他角色和用户都看得到）
-// 【内心活动】（只喂给角色自己，测试阶段打印出来方便你验证，
-//              正式产品里这部分对用户完全不可见）
+// 已接入机制：
+// - 私有记忆：每次发言同时产出【公开发言】+【内心活动】，后者只喂给角色自己
+// - 完整轮次控制：开场轮 + 标准3-4轮交锋（PRD 3.5），跑完自动触发建议收尾横幅
+// - 收尾高光：规则打分选高光句 + 一次轻量压缩改写（PRD 3.6），不发起总结陈词LLM调用
+//
+// 尚未接入（留给后续步骤）：用户插话特殊指令、烟雾报警器实时检测、10轮硬上限的
+// 延长交锋逻辑（该批量测试脚本无真人交互，标准轮数跑完直接收尾）
 
 import { readFile } from "fs/promises";
 import path from "path";
@@ -33,8 +38,11 @@ const DEFAULT_CHARACTER_IDS = ["nietzsche", "machiavelli", "jobs"];
 const CHARACTER_IDS =
   process.argv.length >= 5 ? process.argv.slice(2, 5) : DEFAULT_CHARACTER_IDS;
 
-// 标准交锋轮数（测试阶段先跑2轮，不用跑满3-4轮节省成本）
-const TEST_ROUNDS = 2;
+// 标准交锋轮数（PRD 3.5：标准场景收敛在3-4轮）
+// 延长交锋（5-9轮）仅在用户主动继续互动时才发生——这个批量测试脚本
+// 没有真人交互，所以跑完标准轮数就直接触发"建议收尾"进入收尾流程，
+// 不模拟延长交锋。10轮硬上限是产品里的极端情况兜底，这里不需要模拟。
+const STANDARD_ROUNDS = Number(process.env.DEBATE_ROUNDS) || 4;
 
 // ---------- 工具函数 ----------
 
@@ -207,6 +215,63 @@ function printSpeech(name, speech, innerThought) {
   console.log("─".repeat(50));
 }
 
+// ---------- 收尾高光生成（PRD 3.6：规则打分 + 轻量压缩改写，不新发起总结陈词调用）----------
+
+// 规则打分：长度适中优先，非纯提问句优先，明确判断句（以句号收尾）优先
+function scoreSpeech(text) {
+  let score = 0;
+  const len = text.length;
+
+  if (len >= 60 && len <= 180) score += 3;
+  else score += 1;
+
+  const questionMarks = (text.match(/？/g) || []).length;
+  score -= questionMarks * 2;
+
+  if (/[。]$/.test(text.trim())) score += 2;
+
+  return score;
+}
+
+// 从该角色本场所有公开发言里，规则打分选出得分最高的1-2句作为"高光候选"
+function pickTopLines(character, history, count = 2) {
+  const speeches = history
+    .filter((h) => h.name === character.name)
+    .map((h) => h.text);
+
+  const scored = speeches.map((text) => ({ text, score: scoreSpeech(text) }));
+  scored.sort((a, b) => b.score - a.score);
+
+  return scored.slice(0, count).map((s) => s.text);
+}
+
+// 轻量压缩改写：只用voice/creed/taboos做风格约束，不带完整arsenal/relations，
+// 因为这一步不是论证，是把已经说过的话压缩成一句忠告，属于"收尾"的一部分，
+// 不构成独立的第4次LLM调用类型
+function buildAdviceSystemPrompt(character) {
+  const taboosText = character.taboos.map((t) => `- ${t}`).join("\n");
+  return `你正在扮演：${character.name}（${character.name_en}）
+
+【职责铁律】${character.creed}
+【语言习惯】${character.voice}
+【禁忌】
+${taboosText}
+
+只输出一句忠告本身，不要有任何前缀说明、不要加引号包裹、不要输出JSON。`;
+}
+
+async function compressToAdvice(character, bestLines) {
+  const systemPrompt = buildAdviceSystemPrompt(character);
+  const userMessage = `基于你在本场说过的这些话：
+${bestLines.map((l, i) => `${i + 1}. ${l}`).join("\n")}
+
+把其中最重要的判断浓缩成一句给用户的忠告，不超过40字，保持你一贯的语气，
+不要说本场没说过的新观点，不要加任何引号或前缀，只输出这一句话本身。`;
+
+  const raw = await callClaude(systemPrompt, userMessage);
+  return raw.trim();
+}
+
 // ---------- 主流程 ----------
 
 async function main() {
@@ -262,7 +327,7 @@ async function main() {
   }
 
   // ---- 交锋轮：按顺序轮流发言，能看到之前所有公开发言 ----
-  for (let round = 1; round <= TEST_ROUNDS; round++) {
+  for (let round = 1; round <= STANDARD_ROUNDS; round++) {
     console.log(`\n>>> 第 ${round} 轮交锋\n`);
 
     for (const character of characters) {
@@ -296,14 +361,37 @@ relations里写着认可的部分，要认真当真，不是每次都只挑里�
     }
   }
 
+  // ---- 达到标准轮数：触发"建议收尾"横幅 ----
+  // 正式产品里这是烟雾报警器判定"绕圈/趋同"后触发，由用户拍板是否采纳；
+  // 这个批量测试脚本没有真人交互，默认直接采纳、进入收尾。
+  console.log("\n" + "▓".repeat(50));
+  console.log("【系统横幅】圆桌觉得聊透了，要听听最终忠告吗？");
+  console.log("（测试脚本默认采纳，进入收尾环节）");
+  console.log("▓".repeat(50));
+
+  // ---- 收尾：从历史摘录 + 轻改写，不发起新的总结陈词LLM调用 ----
+  console.log("\n>>> 收尾 · 结辩高光\n");
+
+  for (const character of characters) {
+    const bestLines = pickTopLines(character, history);
+    const advice = await compressToAdvice(character, bestLines);
+
+    console.log(`\n【${character.name} 的忠告】`);
+    console.log(advice);
+    console.log(`（依据本场发言：${bestLines.map((l) => `"${l.slice(0, 20)}..."`).join(" / ")}）`);
+    console.log("─".repeat(50));
+  }
+
   console.log("\n测试结束。对照下面几点自查：");
   console.log("1. 三人开场立场是否互不重复，能不能追溯回各自世界观？");
   console.log("2. 有没有自发的反驳/结盟（不是被指令强制的）？");
   console.log("3. 有没有出现'作为AI''值得深思''首先其次'这类AI腔？");
   console.log("4. 三人的语气是否有明显区分度，还是读起来像同一个人在说话？");
-  console.log("5. 【新增】内心活动是否比公开发言更直接/更情绪化？");
-  console.log("6. 【新增】同一个角色的内心活动，是否随轮次累积情绪（比如越来越不耐烦），");
-  console.log("   而不是每轮都是差不多的平静状态？");
+  console.log("5. 内心活动是否比公开发言更直接/更情绪化？");
+  console.log("6. 同一个角色的内心活动，是否随轮次真实变化（不预设必须升级）？");
+  console.log("7. 【新增】结辩高光的忠告，能不能在上面的发言记录里找到对应出处？");
+  console.log("   （不能是本场没说过的新观点）");
+  console.log("8. 【新增】三人的忠告风格是否也有区分度，不是三句差不多的鸡汤？");
 }
 
 main().catch((err) => {
