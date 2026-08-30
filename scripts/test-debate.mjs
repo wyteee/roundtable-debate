@@ -121,7 +121,15 @@ ${privateMemoryText}
 【输出格式 —— 严格遵守，否则脚本无法解析】
 你必须只输出一个合法JSON对象，不要有任何其他文字、不要用markdown代码块包裹，
 格式如下：
-{"speech": "你的公开发言正文", "inner_thought": "你此刻真实的内心活动，一句话，20字以内，不会给任何人看，可以比发言更直接、更不加掩饰——但情绪类型要如实对应当下发生的事，不要默认必须是愤怒或激动，平静/松动/玩味/得意都是合理的真实反应"}`;
+{"speech": "你的公开发言正文", "inner_thought": "你此刻真实的内心活动，一句话，20字以内，不会给任何人看，可以比发言更直接、更不加掩饰——但情绪类型要如实对应当下发生的事，不要默认必须是愤怒或激动，平静/松动/玩味/得意都是合理的真实反应"}
+
+【极重要的格式限制】
+speech 和 inner_thought 的正文内容里，绝对不能出现英文直引号字符 " ——
+这个字符会破坏JSON格式导致整条发言作废。如果你想强调某个词、引用某句话、
+或者说反话，一律改用中文引号「」或英文单引号 ' 代替，例如：
+不要写 你说的"兑现"很可笑
+应该写 你说的「兑现」很可笑  或者  你说的'兑现'很可笑
+这一条是硬性格式规则，不是文风建议，必须遵守。`;
 }
 
 async function callClaude(systemPrompt, userMessage) {
@@ -150,8 +158,7 @@ async function callClaude(systemPrompt, userMessage) {
   return textBlocks.map((b) => b.text).join("\n").trim();
 }
 
-// 从模型输出里解析出 {speech, inner_thought}，
-// 容错处理：万一模型没听话加了markdown代码块或多余文字，尽量抢救
+// 从模型输出里解析出 {speech, inner_thought}
 function parseSpeechJSON(rawText, characterName) {
   let text = rawText.trim();
 
@@ -175,8 +182,21 @@ function parseSpeechJSON(rawText, characterName) {
       innerThought: parsed.inner_thought || "（无内心活动）",
     };
   } catch (err) {
-    console.warn(`\n[警告] ${characterName} 的输出不是合法JSON，原样当作发言处理，内心活动缺失。`);
-    return { speech: rawText.trim(), innerThought: "（JSON解析失败，无法提取）" };
+    // JSON.parse失败，大概率是模型仍然在正文里混入了英文直引号。
+    // 用正则抢救：找 "speech": " 后面到下一个 ", "inner_thought" 之间的内容
+    const speechRescue = text.match(/"speech"\s*:\s*"([\s\S]*?)"\s*,\s*"inner_thought"/);
+    const thoughtRescue = text.match(/"inner_thought"\s*:\s*"([\s\S]*?)"\s*\}?\s*$/);
+
+    if (speechRescue) {
+      console.warn(`\n[警告] ${characterName} 的输出不是合法JSON（大概率混入了英文引号），已用正则抢救提取。`);
+      return {
+        speech: speechRescue[1].trim(),
+        innerThought: thoughtRescue ? thoughtRescue[1].trim() : "（抢救失败，无法提取）",
+      };
+    }
+
+    console.warn(`\n[警告] ${characterName} 的输出无法解析，原样当作发言处理，内心活动缺失。`);
+    return { speech: rawText.trim(), innerThought: "（解析失败，无法提取）" };
   }
 }
 
