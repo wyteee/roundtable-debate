@@ -27,7 +27,7 @@ if (!API_KEY) {
 }
 
 const MODEL = "claude-sonnet-5";
-const QUESTION = "韬光养晦更好，还是锋芒毕露更好？";
+const QUESTION = process.env.DEBATE_QUESTION || "韬光养晦更好，还是锋芒毕露更好？";
 
 const DEFAULT_CHARACTER_IDS = ["nietzsche", "machiavelli", "jobs"];
 const CHARACTER_IDS =
