@@ -69,9 +69,14 @@ function buildSystemPrompt(character, question, usedAnchors, privateMemoryList) 
       ? `\n【你的私有记忆 —— 只有你自己知道，其他人和用户都看不到】
 这是你在本场之前每一轮心里真实的想法（不是你说出口的话）：
 ${privateMemoryList.map((m, i) => `第${i + 1}轮内心活动：${m}`).join("\n")}
-你现在的情绪状态应该延续、累积这些内心活动的走向——
-如果你一直在被针对、被激怒，这一轮应该比之前更不耐烦/更激动，
-情绪是会累积的，不是每轮重新归零。\n`
+
+你现在的内心活动要如实反映"到目前为止真实发生的事"，不要预设情绪必须
+朝某个方向发展（比如不要默认情绪必须越来越愤怒/越来越激动）。
+真正决定你此刻感受的，是：刚才有没有人真的戳中了你的痛处或漏洞
+（那可能是恼火、不安、想反击）；有没有人说了你其实部分认同的话
+（那可能是松动、意外、不情愿的服气）；还是这一切对你来说其实
+只是一场智力上还算有意思的交锋（那可能是平静、甚至带点玩味的轻蔑）。
+情绪可以升级，也可以缓和，也可以毫无变化——取决于内容本身，不是套路。\n`
       : "";
 
   return `你正在扮演：${character.name}（${character.name_en}）
@@ -113,7 +118,7 @@ ${privateMemoryText}
 【输出格式 —— 严格遵守，否则脚本无法解析】
 你必须只输出一个合法JSON对象，不要有任何其他文字、不要用markdown代码块包裹，
 格式如下：
-{"speech": "你的公开发言正文", "inner_thought": "你此刻真实的内心活动，一句话，20字以内，不会给任何人看，可以比发言更直接、更情绪化、更不加掩饰"}`;
+{"speech": "你的公开发言正文", "inner_thought": "你此刻真实的内心活动，一句话，20字以内，不会给任何人看，可以比发言更直接、更不加掩饰——但情绪类型要如实对应当下发生的事，不要默认必须是愤怒或激动，平静/松动/玩味/得意都是合理的真实反应"}`;
 }
 
 async function callClaude(systemPrompt, userMessage) {
@@ -126,7 +131,7 @@ async function callClaude(systemPrompt, userMessage) {
     },
     body: JSON.stringify({
       model: MODEL,
-      max_tokens: 700,
+      max_tokens: 1000,
       system: systemPrompt,
       messages: [{ role: "user", content: userMessage }],
     }),
