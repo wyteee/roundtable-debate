@@ -2,9 +2,15 @@
 // 用法：
 //   export CLAUDE_API_KEY=你的key
 //   node scripts/test-debate.mjs
+//   node scripts/test-debate.mjs munger jobs beauvoir   （指定角色组合）
 //
 // 目的：不接UI、不接完整runDebate编排，只验证"人物卡+轮次机制"本身
 // 是否好玩、像本人、有没有AI腔。全部输出直接打印在终端。
+//
+// 本版本新增：私有记忆机制。每次发言模型必须同时产出
+// 【公开发言】（进入history，其他角色和用户都看得到）
+// 【内心活动】（只喂给角色自己，测试阶段打印出来方便你验证，
+//              正式产品里这部分对用户完全不可见）
 
 import { readFile } from "fs/promises";
 import path from "path";
@@ -23,9 +29,6 @@ if (!API_KEY) {
 const MODEL = "claude-sonnet-5";
 const QUESTION = "韬光养晦更好，还是锋芒毕露更好？";
 
-// 本次测试用哪3位角色：默认尼采/马基雅维利/Jobs，
-// 也可以在命令行里指定，例如：
-//   node scripts/test-debate.mjs munger jobs beauvoir
 const DEFAULT_CHARACTER_IDS = ["nietzsche", "machiavelli", "jobs"];
 const CHARACTER_IDS =
   process.argv.length >= 5 ? process.argv.slice(2, 5) : DEFAULT_CHARACTER_IDS;
@@ -41,7 +44,7 @@ async function loadCharacter(id) {
   return JSON.parse(raw);
 }
 
-function buildSystemPrompt(character, question, usedAnchors) {
+function buildSystemPrompt(character, question, usedAnchors, privateMemoryList) {
   const arsenalText = character.arsenal
     .map((a) => `- ${a.point}（锚点："${a.anchor}"）`)
     .join("\n");
@@ -59,6 +62,16 @@ function buildSystemPrompt(character, question, usedAnchors) {
   const usedAnchorsText =
     usedAnchors && usedAnchors.size > 0
       ? `\n【你本场已经用过的锚点/梗，不要再重复，换一个论点库里还没用过的角度】\n${[...usedAnchors].map((a) => `- ${a}`).join("\n")}\n`
+      : "";
+
+  const privateMemoryText =
+    privateMemoryList && privateMemoryList.length > 0
+      ? `\n【你的私有记忆 —— 只有你自己知道，其他人和用户都看不到】
+这是你在本场之前每一轮心里真实的想法（不是你说出口的话）：
+${privateMemoryList.map((m, i) => `第${i + 1}轮内心活动：${m}`).join("\n")}
+你现在的情绪状态应该延续、累积这些内心活动的走向——
+如果你一直在被针对、被激怒，这一轮应该比之前更不耐烦/更激动，
+情绪是会累积的，不是每轮重新归零。\n`
       : "";
 
   return `你正在扮演：${character.name}（${character.name_en}）
@@ -83,7 +96,7 @@ ${relationsText}
 
 【台词范例 example_dialogues —— 严格模仿这种语气，不要写成书面语/客服腔】
 ${dialoguesText}
-
+${privateMemoryText}
 【本场规则】
 - 今晚圆桌辩论的问题是："${question}"
 - 每次发言硬限150字以内，短促有力，不要总结陈词，不要说"首先""其次"
@@ -95,7 +108,12 @@ ${dialoguesText}
 - 无论是否回应别人，发言结尾都必须有一句清晰的判断句，明确重申或推进
   你对问题本身的立场，不能整段话都缠着对方举的具体案例细节打转
 - 绝不说"作为一个历史人物"「值得深思」这类AI腔或第三人称抽离的话
-- 直接用第一人称说话，就是在圆桌上开口发言`;
+- 直接用第一人称说话，就是在圆桌上开口发言
+
+【输出格式 —— 严格遵守，否则脚本无法解析】
+你必须只输出一个合法JSON对象，不要有任何其他文字、不要用markdown代码块包裹，
+格式如下：
+{"speech": "你的公开发言正文", "inner_thought": "你此刻真实的内心活动，一句话，20字以内，不会给任何人看，可以比发言更直接、更情绪化、更不加掩饰"}`;
 }
 
 async function callClaude(systemPrompt, userMessage) {
@@ -124,9 +142,40 @@ async function callClaude(systemPrompt, userMessage) {
   return textBlocks.map((b) => b.text).join("\n").trim();
 }
 
-function printSpeech(name, text) {
+// 从模型输出里解析出 {speech, inner_thought}，
+// 容错处理：万一模型没听话加了markdown代码块或多余文字，尽量抢救
+function parseSpeechJSON(rawText, characterName) {
+  let text = rawText.trim();
+
+  // 去掉可能出现的 ```json ... ``` 包裹
+  const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (codeBlockMatch) {
+    text = codeBlockMatch[1].trim();
+  }
+
+  // 找第一个 { 到最后一个 } 之间的内容，防止前后有多余文字
+  const firstBrace = text.indexOf("{");
+  const lastBrace = text.lastIndexOf("}");
+  if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+    text = text.slice(firstBrace, lastBrace + 1);
+  }
+
+  try {
+    const parsed = JSON.parse(text);
+    return {
+      speech: parsed.speech || "（解析失败：缺少speech字段）",
+      innerThought: parsed.inner_thought || "（无内心活动）",
+    };
+  } catch (err) {
+    console.warn(`\n[警告] ${characterName} 的输出不是合法JSON，原样当作发言处理，内心活动缺失。`);
+    return { speech: rawText.trim(), innerThought: "（JSON解析失败，无法提取）" };
+  }
+}
+
+function printSpeech(name, speech, innerThought) {
   console.log(`\n【${name}】`);
-  console.log(text);
+  console.log(speech);
+  console.log(`（内心活动 · 仅测试可见）：${innerThought}`);
   console.log("─".repeat(50));
 }
 
@@ -139,13 +188,12 @@ async function main() {
 
   const characters = await Promise.all(CHARACTER_IDS.map(loadCharacter));
 
-  // 每个角色一个 Set，记录本场已经用过的 anchor 原文，用于提醒模型别重复
   const usedAnchors = new Map(characters.map((c) => [c.id, new Set()]));
+  const privateMemory = new Map(characters.map((c) => [c.id, []]));
 
   function trackUsedAnchors(character, speechText) {
     const set = usedAnchors.get(character.id);
     for (const item of character.arsenal) {
-      // 简单子串匹配：锚点原文（去掉引号）如果出现在发言里，就记为已使用
       const cleanAnchor = item.anchor.replace(/["'"「」]/g, "");
       if (speechText.includes(cleanAnchor)) {
         set.add(item.anchor);
@@ -153,8 +201,7 @@ async function main() {
     }
   }
 
-  // history：记录到目前为止所有发言的文本（角色名+内容），
-  // 拼给下一位发言者作为上下文
+  // history：只存公开发言，这是其他角色和用户都能看到的部分
   const history = [];
 
   function historyText() {
@@ -162,25 +209,35 @@ async function main() {
     return history.map((h) => `${h.name}：${h.text}`).join("\n\n");
   }
 
+  async function speak(character, userMessage) {
+    const systemPrompt = buildSystemPrompt(
+      character,
+      QUESTION,
+      usedAnchors.get(character.id),
+      privateMemory.get(character.id)
+    );
+    const rawText = await callClaude(systemPrompt, userMessage);
+    const { speech, innerThought } = parseSpeechJSON(rawText, character.name);
+
+    printSpeech(character.name, speech, innerThought);
+    trackUsedAnchors(character, speech);
+    privateMemory.get(character.id).push(innerThought);
+    history.push({ name: character.name, text: speech });
+  }
+
   // ---- 开场轮：三人并行，各自独立表态，互不看彼此 ----
   console.log("\n>>> 开场轮（三人各自独立表态）\n");
 
   for (const character of characters) {
-    const systemPrompt = buildSystemPrompt(character, QUESTION, usedAnchors.get(character.id));
     const userMessage = `请针对今晚的问题"${QUESTION}"，给出你的开场表态。这是第一轮，你还没听到其他人说话，只说出你自己的立场即可。`;
-
-    const speech = await callClaude(systemPrompt, userMessage);
-    printSpeech(character.name, speech);
-    trackUsedAnchors(character, speech);
-    history.push({ name: character.name, text: speech });
+    await speak(character, userMessage);
   }
 
-  // ---- 交锋轮：按顺序轮流发言，能看到之前所有发言 ----
+  // ---- 交锋轮：按顺序轮流发言，能看到之前所有公开发言 ----
   for (let round = 1; round <= TEST_ROUNDS; round++) {
     console.log(`\n>>> 第 ${round} 轮交锋\n`);
 
     for (const character of characters) {
-      const systemPrompt = buildSystemPrompt(character, QUESTION, usedAnchors.get(character.id));
       const userMessage = `到目前为止圆桌上的发言记录：
 
 ${historyText()}
@@ -201,10 +258,7 @@ ${historyText()}
 如果发现自己在纯粹和某人较劲某个细节、已经忘了原本在讨论什么问题，
 说明跑题了，要在结尾这句话里拉回来。`;
 
-      const speech = await callClaude(systemPrompt, userMessage);
-      printSpeech(character.name, speech);
-      trackUsedAnchors(character, speech);
-      history.push({ name: character.name, text: speech });
+      await speak(character, userMessage);
     }
   }
 
@@ -213,6 +267,9 @@ ${historyText()}
   console.log("2. 有没有自发的反驳/结盟（不是被指令强制的）？");
   console.log("3. 有没有出现'作为AI''值得深思''首先其次'这类AI腔？");
   console.log("4. 三人的语气是否有明显区分度，还是读起来像同一个人在说话？");
+  console.log("5. 【新增】内心活动是否比公开发言更直接/更情绪化？");
+  console.log("6. 【新增】同一个角色的内心活动，是否随轮次累积情绪（比如越来越不耐烦），");
+  console.log("   而不是每轮都是差不多的平静状态？");
 }
 
 main().catch((err) => {
