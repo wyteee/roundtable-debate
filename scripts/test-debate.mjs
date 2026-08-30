@@ -23,8 +23,12 @@ if (!API_KEY) {
 const MODEL = "claude-sonnet-5";
 const QUESTION = "韬光养晦更好，还是锋芒毕露更好？";
 
-// 本次测试用这3位角色，对应 characters/ 目录下的文件名（不含 .json）
-const CHARACTER_IDS = ["nietzsche", "machiavelli", "jobs"];
+// 本次测试用哪3位角色：默认尼采/马基雅维利/Jobs，
+// 也可以在命令行里指定，例如：
+//   node scripts/test-debate.mjs munger jobs beauvoir
+const DEFAULT_CHARACTER_IDS = ["nietzsche", "machiavelli", "jobs"];
+const CHARACTER_IDS =
+  process.argv.length >= 5 ? process.argv.slice(2, 5) : DEFAULT_CHARACTER_IDS;
 
 // 标准交锋轮数（测试阶段先跑2轮，不用跑满3-4轮节省成本）
 const TEST_ROUNDS = 2;
@@ -88,7 +92,8 @@ ${dialoguesText}
   举例的调味品，不是每次发言的主料，绝不能让"讲自己的经历"取代真实论证
 - 如果这不是开场轮，每次最多只能针对*一个人*的*一句话*做回应，绝不同时回应多个人，
   这会导致发言过长；也不是每次都要回应别人，可以直接推进你自己对问题本身的分析
-- 无论是否回应别人，都必须紧扣问题本身，不要陷入纯粹的人身较劲、忘了原本在辩什么
+- 无论是否回应别人，发言结尾都必须有一句清晰的判断句，明确重申或推进
+  你对问题本身的立场，不能整段话都缠着对方举的具体案例细节打转
 - 绝不说"作为一个历史人物"「值得深思」这类AI腔或第三人称抽离的话
 - 直接用第一人称说话，就是在圆桌上开口发言`;
 }
@@ -187,11 +192,14 @@ ${historyText()}
 否则会说太长。
 
 方式B · 推进：不引用任何人，直接用你自己的世界观继续深入分析
-"${question}"这个问题本身，提出新的角度。
+"${QUESTION}"这个问题本身，提出新的角度。
 
-无论选哪种，都必须紧扣"${question}"这个问题本身——
-如果发现自己在纯粹和某人较劲、已经忘了原本在讨论什么问题，
-说明跑题了，要拉回来。`;
+无论选哪种，发言的**最后一句话**必须是一句清晰的判断句，
+明确重申或推进你对"${QUESTION}"这个问题本身的立场——
+不能整段话都缠着对方举的具体例子打转（比如具体某个历史事件、
+某次具体决策），必须让人一眼看出你此刻站在这个问题的哪一边、为什么。
+如果发现自己在纯粹和某人较劲某个细节、已经忘了原本在讨论什么问题，
+说明跑题了，要在结尾这句话里拉回来。`;
 
       const speech = await callClaude(systemPrompt, userMessage);
       printSpeech(character.name, speech);
