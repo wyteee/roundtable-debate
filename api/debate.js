@@ -1,17 +1,27 @@
-// 圆桌 · POST /api/debate —— 正式接口
+// 圆桌 · POST /api/debate —— 按轮次请求版本（方案A）
+//
+// 架构变更说明（相对于原SSE长连接版本）：
+// 原版本一次请求内跑完整场辩论（开场+全部交锋轮+收尾），靠SSE持续推送。
+// 问题：①单次Serverless函数执行时间随轮次线性增长，10轮硬上限时有超时风险
+//      ②用户插话无法在已经在跑的长连接里"注入"，因为请求体在连接建立时已经固定
+// 现在改为：前端每一轮单独发一次请求，后端不维护任何跨请求状态（真正的无状态），
+// 完整的历史发言和私有记忆由前端在每次请求时完整传入，后端只负责"根据已有上下文，
+// 生成接下来这一轮该说什么"，生成完立即返回，不再长期占用连接。
 //
 // 入参（JSON body）：
-//   { "question": "我该不该辞职", "characterIds": ["nietzsche", "machiavelli", "jobs"] }
+//   {
+//     question: string,
+//     characterIds: string[3],
+//     round: number,                          // 0=开场；1~10=交锋轮
+//     history: {charId,name,text}[],          // 到目前为止全部公开发言（不含本轮）
+//     privateMemory: {[charId]: string[]},    // 到目前为止每人的私有记忆
+//     interjection?: string,                   // 用户在本轮开始前插的话（如果有）
+//     phase?: 'debate' | 'closing'             // 默认'debate'；'closing'用于收尾高光
+//   }
 //
-// 出参：SSE流，每条事件是一行 `data: {...}\n\n`，event.type 有四种：
-//   - "speech" : { type, charId, text, tag }         公开发言，进入前端的messages
-//   - "banner" : { type, text }                       建议收尾横幅
-//   - "advice" : { type, charId, text }                收尾高光忠告
-//   - "done"   : { type }                              流结束
-//   - "error"  : { type, message }                     出错时提前终止
-//
-// 复用逻辑来自 scripts/test-debate.mjs（已验证过人物卡+轮次+私有记忆+收尾高光），
-// 这里做的改造：①从命令行脚本变成HTTP接口 ②新增[标签]分类供前端渲染 ③加SSE推送
+// 出参（普通JSON，不再是SSE）：
+//   debate阶段: { speeches, privateMemory, suggestEnd, bannerText?, hardCapped }
+//   closing阶段: { advice: {charId,text}[] }
 
 import { readFile } from "fs/promises";
 import path from "path";
@@ -19,13 +29,37 @@ import path from "path";
 const API_KEY = process.env.CLAUDE_API_KEY;
 const MODEL = "claude-sonnet-5";
 const STANDARD_ROUNDS = Number(process.env.DEBATE_ROUNDS) || 4;
+const HARD_CAP_ROUNDS = 10;
 
 const CHARACTERS_DIR = path.join(process.cwd(), "characters");
+
+// 一轮包含最多3次连续的Claude调用（含开场轮），默认的Serverless执行时长上限
+// （Vercel Hobby默认10秒）大概率不够用，必须显式延长。Hobby计划最高可设到60秒，
+// Pro及以上可以设更高。如果实测单轮仍然经常超时，优先考虑升级Vercel套餐或
+// 减少max_tokens，而不是继续往上调这个数字掩盖问题。
+export const config = {
+  maxDuration: 60,
+};
 
 async function loadCharacter(id) {
   const filePath = path.join(CHARACTERS_DIR, `${id}.json`);
   const raw = await readFile(filePath, "utf-8");
   return JSON.parse(raw);
+}
+
+// 原来usedAnchors是靠内存里的Set跨请求累积的，现在后端每次请求都是全新开始，
+// 只能从前端传入的完整history里，现场扫描这个角色自己说过的话，
+// 检测里面提到了arsenal里的哪些锚点，重新推算出"已经用过的锚点集合"。
+function deriveUsedAnchors(character, history) {
+  const used = new Set();
+  const ownSpeeches = history.filter((h) => h.charId === character.id).map((h) => h.text);
+  for (const item of character.arsenal) {
+    const cleanAnchor = item.anchor.replace(/["'"「」]/g, "");
+    if (ownSpeeches.some((text) => text.includes(cleanAnchor))) {
+      used.add(item.anchor);
+    }
+  }
+  return used;
 }
 
 function buildSystemPrompt(character, question, usedAnchors, privateMemoryList) {
@@ -156,7 +190,6 @@ function parseSpeechOutput(rawText) {
       target: parsed.target || null,
     };
   } catch (err) {
-    // 正则抢救
     const speechRescue = text.match(/"speech"\s*:\s*"([\s\S]*?)"\s*,\s*"inner_thought"/);
     if (speechRescue) {
       return {
@@ -170,7 +203,6 @@ function parseSpeechOutput(rawText) {
   }
 }
 
-// 把 responseType + target 拼成前端要的 tag 字符串
 function buildTag(round, responseType, target, characterMap) {
   if (round === 0) return "开场";
   const targetName = target && characterMap.has(target) ? characterMap.get(target).name : null;
@@ -221,13 +253,61 @@ ${bestLines.map((l, i) => `${i + 1}. ${l}`).join("\n")}
   return raw.trim();
 }
 
+function historyText(history) {
+  if (!history || history.length === 0) return "（目前还没有人发言）";
+  return history.map((h) => `${h.name}：${h.text}`).join("\n\n");
+}
+
+// 生成"这一轮该说什么"的userMessage。
+// isFirstSpeakerThisRound + interjection同时成立时，这位发言者要先处理插话，
+// 这是PRD里"用户插话特殊处理"机制在按轮次架构下的落地方式：
+// 插话只影响紧跟其后的那一位发言者，不是这一轮全部3人。
+function buildUserMessage(round, question, history, isFirstSpeakerThisRound, interjection) {
+  if (round === 0) {
+    return `请针对今晚的问题"${question}"，给出你的开场表态。这是第一轮，你还没听到其他人说话，只说出你自己的立场即可。`;
+  }
+
+  const interjectionInstruction =
+    isFirstSpeakerThisRound && interjection
+      ? `\n\n【重要 —— 用户刚刚插话了】
+用户说："${interjection}"
+你是插话之后第一个发言的人，必须优先处理这条插话：
+先指出这个观点里最脆弱的一个假设，攻击它；如果你部分同意，要先明确说出
+你不同意的部分是什么，再谈你同意的部分。处理完插话之后，仍然要回到
+"${question}"这个问题本身给出清晰判断，不能只回应插话就结束。`
+      : "";
+
+  return `到目前为止圆桌上的发言记录：
+
+${historyText(history)}
+
+现在轮到你发言，从下面三种方式里选一种（不用每次都选反驳，你自己判断哪种此刻更真实）：
+
+方式A · 反驳：挑*恰好一位*发言者刚才说的*恰好一句*话，正面反驳它。
+
+方式B · 推进：不引用任何人，直接用你自己的世界观继续深入分析"${question}"这个问题本身。
+
+方式C · 结盟：如果*恰好一位*发言者说的话跟你的世界观有真实共鸣，大方承认、借力推进。
+
+无论选哪种，发言的**最后一句话**必须是一句清晰的判断句，明确重申或推进
+你对"${question}"这个问题本身的立场，不能整段话都缠着对方举的具体例子打转。${interjectionInstruction}`;
+}
+
 export default async function handler(req, res) {
   if (req.method !== "POST") {
     res.status(405).json({ error: "只支持POST" });
     return;
   }
 
-  const { question, characterIds } = req.body || {};
+  const {
+    question,
+    characterIds,
+    round,
+    history = [],
+    privateMemory = {},
+    interjection = null,
+    phase = "debate",
+  } = req.body || {};
 
   if (!question || typeof question !== "string" || question.length < 2) {
     res.status(400).json({ error: "question缺失或过短" });
@@ -242,98 +322,119 @@ export default async function handler(req, res) {
     return;
   }
 
-  // SSE响应头
-  res.writeHead(200, {
-    "Content-Type": "text/event-stream",
-    "Cache-Control": "no-cache, no-transform",
-    Connection: "keep-alive",
-  });
-
-  const send = (event) => {
-    res.write(`data: ${JSON.stringify(event)}\n\n`);
-  };
-
   try {
     const characters = await Promise.all(characterIds.map(loadCharacter));
     const characterMap = new Map(characters.map((c) => [c.id, c]));
 
-    const usedAnchors = new Map(characters.map((c) => [c.id, new Set()]));
-    const privateMemory = new Map(characters.map((c) => [c.id, []]));
-    const history = []; // { charId, name, text }
-
-    function trackUsedAnchors(character, speechText) {
-      const set = usedAnchors.get(character.id);
-      for (const item of character.arsenal) {
-        const cleanAnchor = item.anchor.replace(/["'"「」]/g, "");
-        if (speechText.includes(cleanAnchor)) set.add(item.anchor);
-      }
-    }
-
-    function historyText() {
-      if (history.length === 0) return "（目前还没有人发言）";
-      return history.map((h) => `${h.name}：${h.text}`).join("\n\n");
-    }
-
-    async function speak(character, userMessage, round) {
-      const systemPrompt = buildSystemPrompt(
-        character,
-        question,
-        usedAnchors.get(character.id),
-        privateMemory.get(character.id)
-      );
-      const raw = await callClaude(systemPrompt, userMessage);
-      const { speech, innerThought, responseType, target } = parseSpeechOutput(raw);
-
-      trackUsedAnchors(character, speech);
-      privateMemory.get(character.id).push(innerThought);
-      history.push({ charId: character.id, name: character.name, text: speech });
-
-      const tag = buildTag(round, responseType, target, characterMap);
-      send({ type: "speech", charId: character.id, text: speech, tag });
-    }
-
-    // 开场轮
-    for (const character of characters) {
-      const userMessage = `请针对今晚的问题"${question}"，给出你的开场表态。这是第一轮，你还没听到其他人说话，只说出你自己的立场即可。`;
-      await speak(character, userMessage, 0);
-    }
-
-    // 交锋轮
-    for (let round = 1; round <= STANDARD_ROUNDS; round++) {
+    // ---- closing阶段：生成收尾高光，跟具体某一轮无关，独立处理 ----
+    if (phase === "closing") {
+      const advice = [];
       for (const character of characters) {
-        const userMessage = `到目前为止圆桌上的发言记录：
+        const bestLines = pickTopLines(character, history);
+        const text = await compressToAdvice(character, bestLines);
+        advice.push({ charId: character.id, text });
+      }
+      res.status(200).json({ advice });
+      return;
+    }
 
-${historyText()}
+    // ---- debate阶段：只生成"这一轮"的3条发言 ----
+    if (typeof round !== "number" || round < 0) {
+      res.status(400).json({ error: "round缺失或非法" });
+      return;
+    }
 
-现在轮到你发言，从下面三种方式里选一种（不用每次都选反驳，你自己判断哪种此刻更真实）：
+    // 深拷贝一份privateMemory，本轮生成的新内容往这份拷贝里追加，
+    // 不直接改req.body里的对象（虽然这里改不改其实无所谓，避免以后复用出问题）
+    const updatedPrivateMemory = {};
+    for (const c of characters) {
+      updatedPrivateMemory[c.id] = [...(privateMemory[c.id] || [])];
+    }
 
-方式A · 反驳：挑*恰好一位*发言者刚才说的*恰好一句*话，正面反驳它。
+    let speeches = [];
 
-方式B · 推进：不引用任何人，直接用你自己的世界观继续深入分析"${question}"这个问题本身。
+    if (round === 0) {
+      // 开场轮：三人互相之间没有依赖关系（都还没听到别人说话），
+      // 可以并行跑，把总耗时从"三人耗时相加"压到"最慢的那一人"，
+      // 避免不必要地顶着Serverless执行时长上限
+      const results = await Promise.all(
+        characters.map(async (character) => {
+          const usedAnchors = deriveUsedAnchors(character, history);
+          const systemPrompt = buildSystemPrompt(
+            character,
+            question,
+            usedAnchors,
+            updatedPrivateMemory[character.id]
+          );
+          const userMessage = buildUserMessage(round, question, history, false, null);
+          const raw = await callClaude(systemPrompt, userMessage);
+          const parsed = parseSpeechOutput(raw);
+          return { character, ...parsed };
+        })
+      );
 
-方式C · 结盟：如果*恰好一位*发言者说的话跟你的世界观有真实共鸣，大方承认、借力推进。
+      for (const { character, speech, innerThought, responseType, target } of results) {
+        updatedPrivateMemory[character.id].push(innerThought);
+        const tag = buildTag(round, responseType, target, characterMap);
+        speeches.push({ charId: character.id, name: character.name, text: speech, tag });
+      }
+    } else {
+      // 交锋轮：必须顺序执行——第二位发言者要能看到本轮里第一位刚说的话，
+      // 插话的"消费一次"逻辑也依赖固定的发言顺序，不能并行
+      let firstSpeakerConsumedInterjection = false;
+      // history是从req.body解构出来的const，不能直接重新赋值；
+      // 这里单独开一个可变的累积变量，来拼接"传入的历史 + 本轮已生成的部分"，
+      // 只用于给后说话的角色展示上下文，不影响原始history结构
+      let workingHistory = [...history];
 
-无论选哪种，发言的**最后一句话**必须是一句清晰的判断句，明确重申或推进
-你对"${question}"这个问题本身的立场，不能整段话都缠着对方举的具体例子打转。`;
+      for (const character of characters) {
+        const usedAnchors = deriveUsedAnchors(character, workingHistory);
+        const systemPrompt = buildSystemPrompt(
+          character,
+          question,
+          usedAnchors,
+          updatedPrivateMemory[character.id]
+        );
 
-        await speak(character, userMessage, round);
+        const isFirstSpeakerThisRound = !firstSpeakerConsumedInterjection;
+        const userMessage = buildUserMessage(
+          round,
+          question,
+          workingHistory,
+          isFirstSpeakerThisRound,
+          interjection
+        );
+        if (isFirstSpeakerThisRound && interjection) {
+          firstSpeakerConsumedInterjection = true; // 插话只消费一次，给这一轮第一位发言者
+        }
+
+        const raw = await callClaude(systemPrompt, userMessage);
+        const { speech, innerThought, responseType, target } = parseSpeechOutput(raw);
+
+        updatedPrivateMemory[character.id].push(innerThought);
+        workingHistory = [...workingHistory, { charId: character.id, name: character.name, text: speech }];
+
+        const tag = buildTag(round, responseType, target, characterMap);
+        speeches.push({ charId: character.id, name: character.name, text: speech, tag });
       }
     }
 
-    // 建议收尾横幅
-    send({ type: "banner", text: "圆桌觉得聊透了，要听听最终忠告吗？" });
+    const hardCapped = round >= HARD_CAP_ROUNDS;
+    const suggestEnd = hardCapped || round >= STANDARD_ROUNDS;
+    const bannerText = hardCapped
+      ? "圆桌已经聊了很久，我们该收尾了"
+      : suggestEnd
+      ? "圆桌觉得聊透了，要听听最终忠告吗？"
+      : undefined;
 
-    // 收尾高光
-    for (const character of characters) {
-      const bestLines = pickTopLines(character, history);
-      const advice = await compressToAdvice(character, bestLines);
-      send({ type: "advice", charId: character.id, text: advice });
-    }
-
-    send({ type: "done" });
-    res.end();
+    res.status(200).json({
+      speeches,
+      privateMemory: updatedPrivateMemory,
+      suggestEnd,
+      bannerText,
+      hardCapped,
+    });
   } catch (err) {
-    send({ type: "error", message: err.message });
-    res.end();
+    res.status(500).json({ error: err.message });
   }
 }
