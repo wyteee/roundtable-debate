@@ -1,10 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { Character } from '../data/characters'
 
+// 真实辩论结束后要传给收尾屏的数据：每个角色一句基于本场对话生成的忠告
+export interface DebateResult {
+  advice: { charId: string; text: string }[]
+}
+
 interface Props {
   question: string
   chars: Character[]
-  onEnd: () => void
+  onEnd: (result: DebateResult) => void
 }
 
 interface Msg {
@@ -29,6 +34,18 @@ interface PlayItem {
   tag: string
 }
 
+// ---- 打字/阅读节奏相关的可调常量 ----
+// 之前是固定 26ms/字 + 650ms停顿，太快了，一条还没读完下一条就上来了。
+// 现在：逐字速度放慢，且每条播完后的停留时间跟这条话的长度挂钩（长发言多留时间），
+// 而不是无论长短都停一样久。
+const TYPE_MS_PER_CHAR = 45 // 每个字之间的间隔（原来26ms）
+const READ_PAUSE_BASE_MS = 1400 // 播完一条后，最少留多久给用户读（原来固定650ms）
+const READ_PAUSE_PER_CHAR_MS = 35 // 在base基础上，按字数再叠加的阅读时间
+const READ_PAUSE_MAX_MS = 3600 // 单条发言最多留多久，避免太长的话卡太久
+// 收到done事件后，如果播放已经追上了，再等这么久才真正触发收尾，
+// 避免最后一条发言刚出现用户还没读完就被跳走
+const AUTO_END_DELAY_AFTER_CAUGHT_UP_MS = 1800
+
 export default function DebateScreen({ question, chars, onEnd }: Props) {
   const [messages, setMessages] = useState<Msg[]>([])
   // 播放队列现在是正经的React状态（不是ref），这样新内容到达时会自动触发下面
@@ -38,15 +55,20 @@ export default function DebateScreen({ question, chars, onEnd }: Props) {
   const [bannerDismissed, setBannerDismissed] = useState(false)
   const [connectionError, setConnectionError] = useState<string | null>(null)
   const [input, setInput] = useState('')
+  // 后端SSE流是否已经推完（不代表播放动画已经放完，两者是分开的）
+  const [streamDone, setStreamDone] = useState(false)
 
   const idRef = useRef(0)
   const abortControllerRef = useRef<AbortController | null>(null)
+  // 本场真实的收尾高光，从后端advice事件里攒出来的，最终要整个传给收尾屏
   const adviceRef = useRef<{ charId: string; text: string }[]>([])
   const feedRef = useRef<HTMLDivElement>(null)
   const feedCountRef = useRef(0)
   const charById = useMemo(() => new Map(chars.map((c) => [c.id, c])), [chars])
   // 当前正在播放的这一条，从playQueue里取出来后单独放这里
   const [currentItem, setCurrentItem] = useState<PlayItem | null>(null)
+  // 防止自动收尾的useEffect因为依赖变化重复触发多次handleEnd
+  const autoEndTriggeredRef = useRef(false)
 
   // ---- 出队effect：只负责"队列有内容 && 当前没在播"时，把队首挪到currentItem ----
   // 依赖是[playQueue, currentItem]，但这个effect内部不会去改playQueue和currentItem
@@ -69,6 +91,12 @@ export default function DebateScreen({ question, chars, onEnd }: Props) {
       setTyping({ ...currentItem, shown: currentItem.text.slice(0, i) })
       if (i >= currentItem.text.length) {
         clearInterval(timer)
+        // 根据这条发言的长度动态决定读完后停留多久，而不是固定650ms，
+        // 短句少等一点，长句多留时间读完
+        const pause = Math.min(
+          READ_PAUSE_MAX_MS,
+          READ_PAUSE_BASE_MS + currentItem.text.length * READ_PAUSE_PER_CHAR_MS
+        )
         setTimeout(() => {
           setTyping(null)
           feedCountRef.current += 1
@@ -77,9 +105,9 @@ export default function DebateScreen({ question, chars, onEnd }: Props) {
             { id: ++idRef.current, kind: 'char', char: currentItem.char, text: currentItem.text, tag: currentItem.tag },
           ])
           setCurrentItem(null) // 播完了，触发上面那个出队effect去拿下一条
-        }, 650)
+        }, pause)
       }
-    }, 26)
+    }, TYPE_MS_PER_CHAR)
 
     return () => clearInterval(timer)
   }, [currentItem])
@@ -138,7 +166,13 @@ export default function DebateScreen({ question, chars, onEnd }: Props) {
                 { id: ++idRef.current, kind: 'banner', text: event.text },
               ])
             } else if (event.type === 'advice') {
+              // 真实的收尾高光，先攒着，等辩论真正结束（自动或手动）时一起传给收尾屏
               adviceRef.current.push({ charId: event.charId, text: event.text })
+            } else if (event.type === 'done') {
+              // 后端流已经推完所有内容（包括收尾高光）。这里只标记"流结束"，
+              // 不在这里直接跳转——playQueue里可能还有没播完的发言，
+              // 真正的自动跳转由下面那个effect在"播放也追上了"之后触发。
+              setStreamDone(true)
             } else if (event.type === 'error') {
               setConnectionError(event.message)
             }
@@ -161,6 +195,25 @@ export default function DebateScreen({ question, chars, onEnd }: Props) {
     if (el) el.scrollTop = el.scrollHeight
   }, [messages, typing])
 
+  // ---- 自动收尾effect：streamDone为true，且播放队列清空、当前也没在播的时候，
+  // 说明后端内容已经全部推完，且用户也已经把最后一条看完了，再等一小段缓冲时间
+  // 后自动结束辩论、跳转收尾屏。----
+  useEffect(() => {
+    if (!streamDone) return
+    if (playQueue.length > 0) return
+    if (currentItem) return
+    if (autoEndTriggeredRef.current) return
+
+    const timer = setTimeout(() => {
+      if (autoEndTriggeredRef.current) return
+      autoEndTriggeredRef.current = true
+      abortControllerRef.current?.abort()
+      onEnd({ advice: adviceRef.current })
+    }, AUTO_END_DELAY_AFTER_CAUGHT_UP_MS)
+
+    return () => clearTimeout(timer)
+  }, [streamDone, playQueue, currentItem, onEnd])
+
   const roundLabel = useMemo(() => {
     const r = Math.floor(feedCountRef.current / chars.length)
     if (r === 0 && feedCountRef.current < chars.length) return '第 0 轮 · 开场'
@@ -170,9 +223,13 @@ export default function DebateScreen({ question, chars, onEnd }: Props) {
 
   const speakingId = typing?.char.id ?? null
 
+  // 用户手动点"我已有答案"结束：此时后端advice事件不一定已经推送完（比如用户在
+  // 交锋轮中途就想结束），adviceRef.current里有多少算多少，收尾屏那边会对
+  // 没拿到真实advice的角色做兜底处理
   const handleEnd = () => {
+    autoEndTriggeredRef.current = true // 别再让自动收尾effect重复触发
     abortControllerRef.current?.abort()
-    onEnd()
+    onEnd({ advice: adviceRef.current })
   }
 
   const sendInterjection = () => {

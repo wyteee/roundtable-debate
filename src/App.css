@@ -1,0 +1,152 @@
+/* ————— 圆桌 · 柯布西耶视觉系统 ————— */
+
+.font-pixel {
+  font-family: 'Press Start 2P', 'Space Mono', monospace;
+}
+
+/* 中文像素体（12px 的整数倍最清晰） */
+.font-pixel-cn {
+  font-family: 'Fusion Pixel', 'Press Start 2P', monospace;
+}
+
+.font-mono-lc {
+  font-family: 'Space Mono', 'PingFang SC', monospace;
+}
+
+/* 硬边卡片：2px 墨线 + 无模糊偏移阴影 */
+.lc-card {
+  background: var(--lc-ivoire-2);
+  border: 2px solid var(--lc-ink);
+  box-shadow: 5px 5px 0 var(--lc-ink);
+}
+
+.lc-card-flat {
+  background: var(--lc-ivoire-2);
+  border: 2px solid var(--lc-ink);
+  box-shadow: 3px 3px 0 var(--lc-ink);
+}
+
+/* 按钮：硬阴影，按下时压扁 */
+.lc-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  border: 2px solid var(--lc-ink);
+  box-shadow: 4px 4px 0 var(--lc-ink);
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+  transition: transform 0.08s ease, box-shadow 0.08s ease;
+}
+.lc-btn:hover:not(:disabled) {
+  transform: translate(-1px, -1px);
+  box-shadow: 5px 5px 0 var(--lc-ink);
+}
+.lc-btn:active:not(:disabled) {
+  transform: translate(3px, 3px);
+  box-shadow: 1px 1px 0 var(--lc-ink);
+}
+.lc-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.lc-btn-vermillon {
+  background: var(--lc-vermillon);
+  color: var(--lc-ivoire);
+}
+.lc-btn-outremer {
+  background: var(--lc-outremer);
+  color: var(--lc-ivoire);
+}
+.lc-btn-ivoire {
+  background: var(--lc-ivoire);
+  color: var(--lc-ink);
+}
+.lc-btn-ocre {
+  background: var(--lc-ocre);
+  color: var(--lc-ink);
+}
+
+/* 像素头像 */
+.pixelated {
+  image-rendering: pixelated;
+}
+
+/* 打字机光标 */
+.type-cursor::after {
+  content: '▌';
+  margin-left: 1px;
+  animation: blink 0.8s steps(1) infinite;
+  color: var(--lc-vermillon);
+}
+
+@keyframes blink {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* 正在发言呼吸点 */
+.pulse-dot {
+  animation: pulse-dot 1.2s ease-in-out infinite;
+}
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
+  }
+}
+
+/* 发言气泡进入 */
+.msg-in {
+  animation: msg-in 0.25s ease-out;
+}
+@keyframes msg-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 选角卡悬浮 */
+.guest-card {
+  transition: transform 0.12s ease, box-shadow 0.12s ease, opacity 0.2s ease;
+}
+.guest-card:not(.locked):hover {
+  transform: translate(-2px, -2px);
+}
+
+/* 屏幕切换淡入 */
+.screen-in {
+  animation: screen-in 0.35s ease-out;
+}
+@keyframes screen-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 细滚动条 */
+.lc-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+.lc-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.lc-scroll::-webkit-scrollbar-thumb {
+  background: var(--lc-ombre);
+  border: 2px solid var(--lc-ivoire);
+}

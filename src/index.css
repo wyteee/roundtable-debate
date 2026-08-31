@@ -1,0 +1,50 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 缝合像素字体（Fusion Pixel 12px, OFL-1.1，自托管） */
+@font-face {
+  font-family: 'Fusion Pixel';
+  src: url('/fonts/fusion-pixel-12px-proportional-zh_hans.otf.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  /* ——— 柯布西耶建筑色板（Polychromie Architecturale 取色）——— */
+  --lc-ivoire: #f1ead9;        /* 象牙白 · 主底色 */
+  --lc-ivoire-2: #eae1cc;      /* 深一号象牙 · 面板 */
+  --lc-ivoire-3: #e0d5bb;      /* 更深面板 */
+  --lc-ink: #221f1a;           /* 墨黑 */
+  --lc-vermillon: #be3e2d;     /* 朱红 Vermillon 59 */
+  --lc-outremer: #2f4f9e;      /* 群青 Outremer */
+  --lc-outremer-fonce: #27324e;/* 深群青 */
+  --lc-ocre: #c08f3e;          /* 赭石 Ocre */
+  --lc-vert: #4c7a5c;          /* 英式绿 Vert anglais */
+  --lc-ombre: #8a7a66;         /* 暖褐 Ombre naturelle */
+  --lc-ceruleen: #4e8fa6;      /* 蔚蓝 Céruléen */
+  --lc-carmin: #a85762;        /* 胭脂 Carmin */
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  font-family: 'Space Grotesk', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background-color: var(--lc-ivoire);
+  color: var(--lc-ink);
+  /* 建筑蓝图式淡网格 */
+  background-image:
+    linear-gradient(rgba(34, 31, 26, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(34, 31, 26, 0.045) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+::selection {
+  background: var(--lc-ocre);
+  color: var(--lc-ink);
+}
