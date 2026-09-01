@@ -267,15 +267,31 @@ function buildUserMessage(round, question, history, isFirstSpeakerThisRound, int
     return `请针对今晚的问题"${question}"，给出你的开场表态。这是第一轮，你还没听到其他人说话，只说出你自己的立场即可。`;
   }
 
-  const interjectionInstruction =
-    isFirstSpeakerThisRound && interjection
-      ? `\n\n【重要 —— 用户刚刚插话了】
-用户说："${interjection}"
-你是插话之后第一个发言的人，必须优先处理这条插话：
-先指出这个观点里最脆弱的一个假设，攻击它；如果你部分同意，要先明确说出
-你不同意的部分是什么，再谈你同意的部分。处理完插话之后，仍然要回到
-"${question}"这个问题本身给出清晰判断，不能只回应插话就结束。`
-      : "";
+  // 处理插话的这一轮，不再给"方式A/B/C"菜单——两套指令同时给容易让模型
+  // 优先响应菜单、把插话当成次要补充。改成完全独立的严格三段式结构：
+  // 先回应插话，再视情况回应其他嘉宾，最后必须收在对问题本身的判断上。
+  if (isFirstSpeakerThisRound && interjection) {
+    return `到目前为止圆桌上的发言记录：
+
+${historyText(history)}
+
+用户刚刚插话了，说："${interjection}"
+
+你是插话之后第一个发言的人，这一轮必须严格按以下三段结构发言，不要用其他格式：
+
+第一段——正面回应插话：先指出这个观点里最脆弱的一个假设，攻击它；如果你部分
+同意，要先明确说出你不同意的部分是什么，再谈你同意的部分。这部分是重点，
+不能一笔带过就转移话题。
+
+第二段——（可选）如果发言记录里有某位嘉宾说的话，跟你要说的内容确实有关，
+可以顺带反驳或借力，但不是必须的，没有合适的对象就不要硬找。
+
+第三段——回到"${question}"这个问题本身，给出一句清晰的判断句，明确重申或
+推进你的立场，不能让整段话停留在只回应插话或只回应其他嘉宾。
+
+发言依然要遵守之前提到的字数限制和语气要求，三段内容自然衔接成一段完整发言，
+不要真的写"第一段""第二段"这种标签。`;
+  }
 
   return `到目前为止圆桌上的发言记录：
 
@@ -290,7 +306,7 @@ ${historyText(history)}
 方式C · 结盟：如果*恰好一位*发言者说的话跟你的世界观有真实共鸣，大方承认、借力推进。
 
 无论选哪种，发言的**最后一句话**必须是一句清晰的判断句，明确重申或推进
-你对"${question}"这个问题本身的立场，不能整段话都缠着对方举的具体例子打转。${interjectionInstruction}`;
+你对"${question}"这个问题本身的立场，不能整段话都缠着对方举的具体例子打转。`;
 }
 
 export default async function handler(req, res) {
@@ -328,13 +344,17 @@ export default async function handler(req, res) {
 
     // ---- closing阶段：生成收尾高光，跟具体某一轮无关，独立处理 ----
     if (phase === "closing") {
-      const advice = [];
-      for (const character of characters) {
-        const bestLines = pickTopLines(character, history);
-        const text = await compressToAdvice(character, bestLines);
-        advice.push({ charId: character.id, text });
-      }
-      res.status(200).json({ advice });
+      // 三人的忠告生成互相没有依赖关系，跟开场轮同样的道理，应该并行而不是
+      // 顺序执行——之前这里漏掉了这个优化，顺序跑三次Claude调用导致收尾阶段
+      // 感觉像"卡住"了，其实只是三次调用时间顺序相加，改成并行后应该明显加快。
+      const results = await Promise.all(
+        characters.map(async (character) => {
+          const bestLines = pickTopLines(character, history);
+          const text = await compressToAdvice(character, bestLines);
+          return { charId: character.id, text };
+        })
+      );
+      res.status(200).json({ advice: results });
       return;
     }
 
@@ -381,13 +401,37 @@ export default async function handler(req, res) {
     } else {
       // 交锋轮：必须顺序执行——第二位发言者要能看到本轮里第一位刚说的话，
       // 插话的"消费一次"逻辑也依赖固定的发言顺序，不能并行
+
+      // 发言顺序按轮次轮换，而不是永远固定同一个顺序——PRD 3.5节写的是
+      // "标准交锋...自然轮换"，之前每轮都用characters数组原始顺序，
+      // 导致"处理插话"这个职责永远落在同一个人身上（数组里排第一那位），
+      // 另外两位不管辩论多少轮都不会被赋予回应插话的机会。
+      // 用(round-1)对人数取余做循环位移：round1从第0位开始，round2从第1位
+      // 开始，round3从第2位开始，round4又回到第0位，循环往复。
+      const rotation = (round - 1) % characters.length;
+      const speakingOrder = [
+        ...characters.slice(rotation),
+        ...characters.slice(0, rotation),
+      ];
+
       let firstSpeakerConsumedInterjection = false;
       // history是从req.body解构出来的const，不能直接重新赋值；
       // 这里单独开一个可变的累积变量，来拼接"传入的历史 + 本轮已生成的部分"，
       // 只用于给后说话的角色展示上下文，不影响原始history结构
       let workingHistory = [...history];
 
-      for (const character of characters) {
+      // 关键修复：之前插话内容只作为"特殊指令"塞给第一位发言者，从未真正写进
+      // workingHistory，导致同一轮的第二、三位发言者的historyText里根本看不到
+      // 用户说过什么——不是他们选择无视，是上下文里压根没有这条记录。
+      // 现在把插话作为一条"你"说的记录，提前插入workingHistory，
+      // 这样本轮全部发言者都能在"到目前为止的发言记录"里看到它。
+      let interjectionEntry = null;
+      if (interjection) {
+        interjectionEntry = { charId: "user", name: "你", text: interjection };
+        workingHistory = [...workingHistory, interjectionEntry];
+      }
+
+      for (const character of speakingOrder) {
         const usedAnchors = deriveUsedAnchors(character, workingHistory);
         const systemPrompt = buildSystemPrompt(
           character,
@@ -405,7 +449,7 @@ export default async function handler(req, res) {
           interjection
         );
         if (isFirstSpeakerThisRound && interjection) {
-          firstSpeakerConsumedInterjection = true; // 插话只消费一次，给这一轮第一位发言者
+          firstSpeakerConsumedInterjection = true; // "必须攻击"这条硬指令只消费一次，给第一位发言者
         }
 
         const raw = await callClaude(systemPrompt, userMessage);
@@ -416,6 +460,26 @@ export default async function handler(req, res) {
 
         const tag = buildTag(round, responseType, target, characterMap);
         speeches.push({ charId: character.id, name: character.name, text: speech, tag });
+      }
+
+      // 把插话记录also返回给前端，前端会把它并入自己的history state里持久保存，
+      // 这样以后每一轮请求都会带着这条"用户说过的话"，不再是只在这一轮里
+      // 昙花一现——即便"必须攻击"的硬指令只生效一次，这句话本身留在对话记录里。
+      if (interjectionEntry) {
+        res.status(200).json({
+          speeches,
+          privateMemory: updatedPrivateMemory,
+          suggestEnd: round >= HARD_CAP_ROUNDS || round >= STANDARD_ROUNDS,
+          bannerText:
+            round >= HARD_CAP_ROUNDS
+              ? "圆桌已经聊了很久，我们该收尾了"
+              : round >= STANDARD_ROUNDS
+              ? "圆桌觉得聊透了，要听听最终忠告吗？"
+              : undefined,
+          hardCapped: round >= HARD_CAP_ROUNDS,
+          interjectionEntry,
+        });
+        return;
       }
     }
 

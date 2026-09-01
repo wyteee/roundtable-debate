@@ -18,15 +18,18 @@ interface Msg {
   char?: Character
   text: string
   tag?: string
+  // 只有banner用：这条横幅是否提供"再聊聊"选项（硬上限时不提供）、
+  // 以及这条横幅是否已经被用户处理过（点过按钮之后不再显示按钮，避免重复触发）
+  canContinue?: boolean
+  resolved?: boolean
 }
 
-// 对应后端 api/debate.js 推送的SSE事件格式
-type ServerEvent =
-  | { type: 'speech'; charId: string; text: string; tag: string }
-  | { type: 'banner'; text: string }
-  | { type: 'advice'; charId: string; text: string }
-  | { type: 'done' }
-  | { type: 'error'; message: string }
+// 对应后端 api/debate.js 的历史发言记录格式（跟request/response里的history字段一致）
+interface HistoryEntry {
+  charId: string
+  name: string
+  text: string
+}
 
 interface PlayItem {
   char: Character
@@ -34,45 +37,70 @@ interface PlayItem {
   tag: string
 }
 
+// 每轮请求成功后返回的、影响"接下来该做什么"的关键信息
+interface RoundResult {
+  suggestEnd: boolean
+  bannerText?: string
+  hardCapped: boolean
+}
+
+// 请求状态机：
+// idle          - 没有请求在跑，watcher effect会根据lastRoundResult决定下一步做什么
+// loading       - 正在请求下一轮
+// awaiting-user - 已经显示了"建议收尾"横幅，等用户点"再聊聊"或"去收尾"
+// closing       - 正在请求收尾高光
+// error         - 上一次请求失败，等用户手动重试，不会自动继续
+type FetchStatus = 'idle' | 'loading' | 'awaiting-user' | 'closing' | 'error'
+
 // ---- 打字/阅读节奏相关的可调常量 ----
-// 之前是固定 26ms/字 + 650ms停顿，太快了，一条还没读完下一条就上来了。
-// 现在：逐字速度放慢，且每条播完后的停留时间跟这条话的长度挂钩（长发言多留时间），
-// 而不是无论长短都停一样久。
-const TYPE_MS_PER_CHAR = 45 // 每个字之间的间隔（原来26ms）
-const READ_PAUSE_BASE_MS = 1400 // 播完一条后，最少留多久给用户读（原来固定650ms）
-const READ_PAUSE_PER_CHAR_MS = 35 // 在base基础上，按字数再叠加的阅读时间
-const READ_PAUSE_MAX_MS = 3600 // 单条发言最多留多久，避免太长的话卡太久
-// 收到done事件后，如果播放已经追上了，再等这么久才真正触发收尾，
-// 避免最后一条发言刚出现用户还没读完就被跳走
-const AUTO_END_DELAY_AFTER_CAUGHT_UP_MS = 1800
+const TYPE_MS_PER_CHAR = 45
+const READ_PAUSE_BASE_MS = 1400
+const READ_PAUSE_PER_CHAR_MS = 35
+const READ_PAUSE_MAX_MS = 3600
+// 每一轮的3条发言全部播完之后，不管这轮发言本身有多长/多短，都额外留这么久
+// 的固定缓冲期，专门用来给用户反应"要不要点我要插话"——之前没有这个独立的缓冲，
+// 完全依附在"这轮发言播放要多久"上，发言越短窗口就越短，跟用户有没有点按钮无关，
+// 纯粹是时间窗口本身在缩水，容易出现"点了也来不及"的情况。
+// 原本设成3秒，实测反馈太短，调到6秒。
+const POST_ROUND_GRACE_MS = 6000
 
 export default function DebateScreen({ question, chars, onEnd }: Props) {
   const [messages, setMessages] = useState<Msg[]>([])
-  // 播放队列现在是正经的React状态（不是ref），这样新内容到达时会自动触发下面
-  // 那个effect重新检查，不再依赖手写while循环去"轮询"一个ref，那套机制不稳定。
   const [playQueue, setPlayQueue] = useState<PlayItem[]>([])
   const [typing, setTyping] = useState<(PlayItem & { shown: string }) | null>(null)
-  const [bannerDismissed, setBannerDismissed] = useState(false)
+  const [currentItem, setCurrentItem] = useState<PlayItem | null>(null)
   const [connectionError, setConnectionError] = useState<string | null>(null)
+  const [fetchStatus, setFetchStatus] = useState<FetchStatus>('idle')
   const [input, setInput] = useState('')
-  // 后端SSE流是否已经推完（不代表播放动画已经放完，两者是分开的）
-  const [streamDone, setStreamDone] = useState(false)
 
-  const idRef = useRef(0)
-  const abortControllerRef = useRef<AbortController | null>(null)
-  // 本场真实的收尾高光，从后端advice事件里攒出来的，最终要整个传给收尾屏
-  const adviceRef = useRef<{ charId: string; text: string }[]>([])
+  // 缓冲期是否正在进行中，只用来给按钮加一点视觉提示，不参与任何逻辑判断
+  const [graceActive, setGraceActive] = useState(false)
   const feedRef = useRef<HTMLDivElement>(null)
   const feedCountRef = useRef(0)
+  const idRef = useRef(0) // 消息的唯一id生成器，之前不小心漏掉了声明，只留了使用
   const charById = useMemo(() => new Map(chars.map((c) => [c.id, c])), [chars])
-  // 当前正在播放的这一条，从playQueue里取出来后单独放这里
-  const [currentItem, setCurrentItem] = useState<PlayItem | null>(null)
-  // 防止自动收尾的useEffect因为依赖变化重复触发多次handleEnd
-  const autoEndTriggeredRef = useRef(false)
+  const abortControllerRef = useRef<AbortController | null>(null)
 
-  // ---- 出队effect：只负责"队列有内容 && 当前没在播"时，把队首挪到currentItem ----
-  // 依赖是[playQueue, currentItem]，但这个effect内部不会去改playQueue和currentItem
-  // 之外的东西，不会出现"自己写的状态把自己刚触发的动画立刻打断"的问题
+  // ---- 方案A的核心状态：不再由后端记忆，改成前端自己攒着，每次请求完整传回去 ----
+  const historyRef = useRef<HistoryEntry[]>([])
+  const privateMemoryRef = useRef<Record<string, string[]>>({})
+  const nextRoundRef = useRef(0) // 下一次该请求第几轮
+  const pendingInterjectionRef = useRef<string | null>(null) // 待发送、还没被下一轮消费的插话
+  const lastRoundResultRef = useRef<RoundResult | null>(null)
+  const endedRef = useRef(false) // 防止onEnd被重复调用
+
+  // ---- 插话相关：从"输入框一直开着、机会性地被下一次自动请求捡走"，
+  // 改成"点按钮显式暂停整个自动推进流程，直到用户提交或放弃"----
+  // interjectionPausedRef为true期间，下面的watcher effect完全不做任何决定
+  // （不自动请求下一轮、也不弹报警器横幅），哪怕这时候恰好有一轮已经播完了。
+  // 用一个ref而不是state，是因为它只被内部逻辑读取判断，不直接参与渲染。
+  const interjectionPausedRef = useRef(false)
+  const [interjectionMode, setInterjectionMode] = useState(false)
+  // 每次用户提交/放弃插话后+1，强制下面的watcher effect重新跑一次判断
+  // （因为effect依赖数组里放的是state，光改一个ref不会触发effect重新执行）
+  const [resumeTick, setResumeTick] = useState(0)
+
+  // ---- 出队effect：跟原来一样，队列有内容且当前没在播时，挪一条到currentItem ----
   useEffect(() => {
     if (currentItem) return
     if (playQueue.length === 0) return
@@ -81,8 +109,7 @@ export default function DebateScreen({ question, chars, onEnd }: Props) {
     setPlayQueue(rest)
   }, [playQueue, currentItem])
 
-  // ---- 打字动画effect：只依赖currentItem，currentItem整个播放周期内只变化两次
-  // （null→有内容→null），播放过程中不会因为playQueue变化被意外打断 ----
+  // ---- 打字动画effect：跟原来一样 ----
   useEffect(() => {
     if (!currentItem) return
     let i = 0
@@ -91,8 +118,6 @@ export default function DebateScreen({ question, chars, onEnd }: Props) {
       setTyping({ ...currentItem, shown: currentItem.text.slice(0, i) })
       if (i >= currentItem.text.length) {
         clearInterval(timer)
-        // 根据这条发言的长度动态决定读完后停留多久，而不是固定650ms，
-        // 短句少等一点，长句多留时间读完
         const pause = Math.min(
           READ_PAUSE_MAX_MS,
           READ_PAUSE_BASE_MS + currentItem.text.length * READ_PAUSE_PER_CHAR_MS
@@ -104,7 +129,7 @@ export default function DebateScreen({ question, chars, onEnd }: Props) {
             ...m,
             { id: ++idRef.current, kind: 'char', char: currentItem.char, text: currentItem.text, tag: currentItem.tag },
           ])
-          setCurrentItem(null) // 播完了，触发上面那个出队effect去拿下一条
+          setCurrentItem(null)
         }, pause)
       }
     }, TYPE_MS_PER_CHAR)
@@ -113,130 +138,259 @@ export default function DebateScreen({ question, chars, onEnd }: Props) {
   }, [currentItem])
 
   useEffect(() => {
-    const controller = new AbortController()
-    abortControllerRef.current = controller
-
-    const run = async () => {
-      try {
-        const res = await fetch('/api/debate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ question, characterIds: chars.map((c) => c.id) }),
-          signal: controller.signal,
-        })
-
-        if (!res.ok || !res.body) {
-          setConnectionError(`接口请求失败（状态码 ${res.status}）`)
-          return
-        }
-
-        const reader = res.body.getReader()
-        const decoder = new TextDecoder()
-        let buffer = ''
-
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          buffer += decoder.decode(value, { stream: true })
-
-          const frames = buffer.split('\n\n')
-          buffer = frames.pop() ?? ''
-
-          for (const frame of frames) {
-            const line = frame.trim()
-            if (!line.startsWith('data:')) continue
-            const jsonStr = line.slice(5).trim()
-            if (!jsonStr) continue
-
-            let event: ServerEvent
-            try {
-              event = JSON.parse(jsonStr)
-            } catch {
-              continue
-            }
-
-            if (event.type === 'speech') {
-              const char = charById.get(event.charId)
-              if (char) {
-                setPlayQueue((q) => [...q, { char, text: event.text, tag: event.tag }])
-              }
-            } else if (event.type === 'banner') {
-              setMessages((m) => [
-                ...m,
-                { id: ++idRef.current, kind: 'banner', text: event.text },
-              ])
-            } else if (event.type === 'advice') {
-              // 真实的收尾高光，先攒着，等辩论真正结束（自动或手动）时一起传给收尾屏
-              adviceRef.current.push({ charId: event.charId, text: event.text })
-            } else if (event.type === 'done') {
-              // 后端流已经推完所有内容（包括收尾高光）。这里只标记"流结束"，
-              // 不在这里直接跳转——playQueue里可能还有没播完的发言，
-              // 真正的自动跳转由下面那个effect在"播放也追上了"之后触发。
-              setStreamDone(true)
-            } else if (event.type === 'error') {
-              setConnectionError(event.message)
-            }
-          }
-        }
-      } catch (err) {
-        if ((err as Error).name !== 'AbortError') {
-          setConnectionError('连接中断，请稍后重试')
-        }
-      }
-    }
-
-    run()
-    return () => controller.abort()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  useEffect(() => {
     const el = feedRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [messages, typing])
 
-  // ---- 自动收尾effect：streamDone为true，且播放队列清空、当前也没在播的时候，
-  // 说明后端内容已经全部推完，且用户也已经把最后一条看完了，再等一小段缓冲时间
-  // 后自动结束辩论、跳转收尾屏。----
+  // ---- 请求某一轮的发言 ----
+  const fetchRound = async (round: number) => {
+    setFetchStatus('loading')
+    const controller = new AbortController()
+    abortControllerRef.current = controller
+
+    // 插话消费一次：这次请求带上去之后就清空，不管这轮实际有没有用到，
+    // 避免同一句插话被反复带进后面好几轮请求里
+    const interjectionToSend = pendingInterjectionRef.current ?? undefined
+    pendingInterjectionRef.current = null
+
+    try {
+      const res = await fetch('/api/debate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question,
+          characterIds: chars.map((c) => c.id),
+          round,
+          history: historyRef.current,
+          privateMemory: privateMemoryRef.current,
+          interjection: interjectionToSend,
+          phase: 'debate',
+        }),
+        signal: controller.signal,
+      })
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        setConnectionError(body.error || `接口请求失败（状态码 ${res.status}）`)
+        setFetchStatus('error')
+        // 请求失败，插话没有真正被消费，放回去，重试的时候还能带上
+        if (interjectionToSend) pendingInterjectionRef.current = interjectionToSend
+        return
+      }
+
+      const data = await res.json()
+
+      // 如果这轮消费了用户插话，后端会额外返回一条"你"说的历史记录，
+      // 需要按时间顺序插在这轮发言之前，让插话真正留在对话记录里、
+      // 影响未来所有轮次的上下文，而不是只在这一轮里昙花一现。
+      const interjectionHistoryEntry: HistoryEntry[] = data.interjectionEntry
+        ? [{ charId: data.interjectionEntry.charId, name: data.interjectionEntry.name, text: data.interjectionEntry.text }]
+        : []
+
+      historyRef.current = [
+        ...historyRef.current,
+        ...interjectionHistoryEntry,
+        ...data.speeches.map((s: { charId: string; name: string; text: string }) => ({
+          charId: s.charId,
+          name: s.name,
+          text: s.text,
+        })),
+      ]
+      privateMemoryRef.current = data.privateMemory
+
+      const newItems: PlayItem[] = data.speeches
+        .map((s: { charId: string; text: string; tag: string }) => {
+          const char = charById.get(s.charId)
+          if (!char) return null
+          return { char, text: s.text, tag: s.tag }
+        })
+        .filter(Boolean)
+      setPlayQueue((q) => [...q, ...newItems])
+
+      lastRoundResultRef.current = {
+        suggestEnd: data.suggestEnd,
+        bannerText: data.bannerText,
+        hardCapped: data.hardCapped,
+      }
+      nextRoundRef.current = round + 1
+      setFetchStatus('idle') // 交给下面的watcher effect，等播放追上了再决定下一步
+    } catch (err) {
+      if ((err as Error).name === 'AbortError') return // 用户主动结束，静默忽略
+      setConnectionError('连接中断，请稍后重试')
+      setFetchStatus('error')
+      if (interjectionToSend) pendingInterjectionRef.current = interjectionToSend
+    }
+  }
+
+  // ---- 请求收尾高光，成功后调用onEnd跳转 ----
+  const fetchClosing = async () => {
+    if (endedRef.current) return
+    setFetchStatus('closing')
+    const controller = new AbortController()
+    abortControllerRef.current = controller
+
+    try {
+      const res = await fetch('/api/debate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          question,
+          characterIds: chars.map((c) => c.id),
+          history: historyRef.current,
+          phase: 'closing',
+        }),
+        signal: controller.signal,
+      })
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        setConnectionError(body.error || `收尾请求失败（状态码 ${res.status}）`)
+        setFetchStatus('error')
+        return
+      }
+
+      const data = await res.json()
+      if (endedRef.current) return
+      endedRef.current = true
+      onEnd({ advice: data.advice ?? [] })
+    } catch (err) {
+      if ((err as Error).name === 'AbortError') return
+      setConnectionError('收尾请求失败，请重试')
+      setFetchStatus('error')
+    }
+  }
+
+  // ---- 组件挂载时，请求第0轮（开场） ----
   useEffect(() => {
-    if (!streamDone) return
+    fetchRound(0)
+    return () => abortControllerRef.current?.abort()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // ---- watcher effect：播放追上了（队列空、当前没在播）且没有请求在跑时，
+  // 根据上一轮的结果决定接下来做什么：
+  //   - hardCapped：直接强制进入收尾，不再给"继续"选项
+  //   - suggestEnd（未到硬上限）：把横幅加进消息流，等用户点按钮
+  //   - 都不是：自动请求下一轮
+  // 这个时机判断比原来SSE版本更准确——原来banner是"数据一到就立刻显示"，
+  // 可能显示在还没播完的发言前面；现在banner只在真正播放追上之后才出现。----
+  // ---- watcher effect：播放追上了（队列空、当前没在播）且没有请求在跑时，
+  // 先固定等待POST_ROUND_GRACE_MS这么久（给用户留出点"我要插话"的窗口），
+  // 缓冲期结束时再检查一次有没有被暂停——如果用户在缓冲期内点了按钮，
+  // interjectionPausedRef会变成true，到时候直接放弃这次自动推进。
+  // 缓冲期本身跟这轮发言多长完全无关，保证每轮都有同样长的反应时间。
+  // 缓冲期过后，根据上一轮的结果决定接下来做什么：
+  //   - hardCapped：直接强制进入收尾，不再给"继续"选项
+  //   - suggestEnd（未到硬上限）：把横幅加进消息流，等用户点按钮
+  //   - 都不是：自动请求下一轮
+  useEffect(() => {
     if (playQueue.length > 0) return
     if (currentItem) return
-    if (autoEndTriggeredRef.current) return
+    if (fetchStatus !== 'idle') return
+    if (interjectionPausedRef.current) return // 已经点了暂停，缓冲期都不用等了
+    const result = lastRoundResultRef.current
+    if (!result) return // 还没有任何一轮结果，说明第0轮还没回来，不用管
 
+    setGraceActive(true)
     const timer = setTimeout(() => {
-      if (autoEndTriggeredRef.current) return
-      autoEndTriggeredRef.current = true
-      abortControllerRef.current?.abort()
-      onEnd({ advice: adviceRef.current })
-    }, AUTO_END_DELAY_AFTER_CAUGHT_UP_MS)
+      // 缓冲期结束时再查一次——用户可能就是在这几秒里点的"我要插话"
+      setGraceActive(false)
+      if (interjectionPausedRef.current) return
 
-    return () => clearTimeout(timer)
-  }, [streamDone, playQueue, currentItem, onEnd])
+      if (result.hardCapped) {
+        lastRoundResultRef.current = null
+        setMessages((m) => [
+          ...m,
+          { id: ++idRef.current, kind: 'banner', text: result.bannerText ?? '', canContinue: false },
+        ])
+        fetchClosing()
+      } else if (result.suggestEnd) {
+        lastRoundResultRef.current = null
+        setMessages((m) => [
+          ...m,
+          { id: ++idRef.current, kind: 'banner', text: result.bannerText ?? '', canContinue: true },
+        ])
+        setFetchStatus('awaiting-user')
+      } else {
+        lastRoundResultRef.current = null
+        fetchRound(nextRoundRef.current)
+      }
+    }, POST_ROUND_GRACE_MS)
+
+    return () => {
+      clearTimeout(timer)
+      setGraceActive(false)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playQueue, currentItem, fetchStatus, resumeTick])
 
   const roundLabel = useMemo(() => {
+    if (fetchStatus === 'closing') return '正在生成结辩高光…'
     const r = Math.floor(feedCountRef.current / chars.length)
     if (r === 0 && feedCountRef.current < chars.length) return '第 0 轮 · 开场'
-    return `第 ${Math.min(r, 4)} / 4 轮 · 交锋中`
+    return `第 ${r} 轮 · 交锋中`
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages, chars.length])
+  }, [messages, chars.length, fetchStatus])
 
   const speakingId = typing?.char.id ?? null
 
-  // 用户手动点"我已有答案"结束：此时后端advice事件不一定已经推送完（比如用户在
-  // 交锋轮中途就想结束），adviceRef.current里有多少算多少，收尾屏那边会对
-  // 没拿到真实advice的角色做兜底处理
+  // 用户点顶部"我已有答案"：不管现在是哪个阶段，都直接打断、去请求收尾高光。
+  // historyRef里已经有的内容（哪怕还没播放完）足够生成靠谱的忠告，
+  // 不需要等所有动画播完。
   const handleEnd = () => {
-    autoEndTriggeredRef.current = true // 别再让自动收尾effect重复触发
     abortControllerRef.current?.abort()
-    onEnd({ advice: adviceRef.current })
+    fetchClosing()
+  }
+
+  // 横幅"再聊聊"：标记这条横幅已处理，请求下一轮
+  const handleBannerContinue = (bannerId: number) => {
+    setMessages((m) => m.map((msg) => (msg.id === bannerId ? { ...msg, resolved: true } : msg)))
+    setFetchStatus('idle')
+    fetchRound(nextRoundRef.current)
+  }
+
+  // 横幅"去收尾"：标记已处理，直接走收尾流程
+  const handleBannerEnd = (bannerId: number) => {
+    setMessages((m) => m.map((msg) => (msg.id === bannerId ? { ...msg, resolved: true } : msg)))
+    fetchClosing()
+  }
+
+  // 请求失败后的手动重试：nextRoundRef只在请求成功时才会+1，
+  // 所以失败时它天然还停在"应该重试的那一轮"，直接用它比反推history长度更准确
+  // （尤其是插话记录混进history之后，history长度已经不能简单除以人数推算轮次了）
+  const handleRetry = () => {
+    setConnectionError(null)
+    if (fetchStatus === 'error') {
+      setFetchStatus('idle')
+      fetchRound(nextRoundRef.current)
+    }
   }
 
   const sendInterjection = () => {
     const t = input.trim()
     if (!t) return
     setMessages((m) => [...m, { id: ++idRef.current, kind: 'user', text: t }])
+    pendingInterjectionRef.current = t
     setInput('')
+    interjectionPausedRef.current = false
+    setInterjectionMode(false)
+    setResumeTick((n) => n + 1) // 强制watcher effect重新评估，恢复自动推进
+  }
+
+  // 点"我要插话"：暂停自动推进，打开输入框。这一刻如果恰好有一轮请求正在飞
+  // （fetchStatus==='loading'），那一轮没法收回，会照常返回；但只要用户还没
+  // 提交/放弃，watcher就不会再继续往下一轮走，插话不会像以前那样被更远的轮次抢走。
+  const openInterjection = () => {
+    interjectionPausedRef.current = true
+    setInterjectionMode(true)
+  }
+
+  // "算了，继续吧"：放弃插话，恢复自动推进，不影响原本的对话内容
+  const cancelInterjection = () => {
+    interjectionPausedRef.current = false
+    setInterjectionMode(false)
+    setInput('')
+    setResumeTick((n) => n + 1)
   }
 
   return (
@@ -257,8 +411,11 @@ export default function DebateScreen({ question, chars, onEnd }: Props) {
 
       {connectionError && (
         <div className="max-w-6xl mx-auto w-full px-4 pt-3">
-          <div className="border-2 border-[var(--lc-vermillon)] bg-[var(--lc-vermillon)]/10 px-4 py-2 text-sm">
-            {connectionError}
+          <div className="border-2 border-[var(--lc-vermillon)] bg-[var(--lc-vermillon)]/10 px-4 py-2 text-sm flex items-center justify-between gap-3">
+            <span>{connectionError}</span>
+            <button onClick={handleRetry} className="lc-btn lc-btn-outremer px-3 py-1 text-xs shrink-0">
+              重试
+            </button>
           </div>
         </div>
       )}
@@ -303,7 +460,7 @@ export default function DebateScreen({ question, chars, onEnd }: Props) {
           <div ref={feedRef} className="lc-scroll flex-1 min-h-0 overflow-y-auto pr-1 space-y-4 pb-2">
             {messages.map((m) => {
               if (m.kind === 'banner') {
-                if (bannerDismissed) return null
+                if (m.resolved) return null
                 return (
                   <div
                     key={m.id}
@@ -312,15 +469,20 @@ export default function DebateScreen({ question, chars, onEnd }: Props) {
                     <span className="font-mono-lc text-xs font-bold shrink-0">⚠ 圆桌报警器</span>
                     <span className="text-sm flex-1 min-w-[200px]">{m.text}</span>
                     <div className="flex gap-2">
-                      <button onClick={handleEnd} className="lc-btn lc-btn-outremer px-3 py-1.5 text-sm">
+                      <button
+                        onClick={() => handleBannerEnd(m.id)}
+                        className="lc-btn lc-btn-outremer px-3 py-1.5 text-sm"
+                      >
                         去收尾 →
                       </button>
-                      <button
-                        onClick={() => setBannerDismissed(true)}
-                        className="lc-btn lc-btn-ivoire px-3 py-1.5 text-sm"
-                      >
-                        再聊聊
-                      </button>
+                      {m.canContinue && (
+                        <button
+                          onClick={() => handleBannerContinue(m.id)}
+                          className="lc-btn lc-btn-ivoire px-3 py-1.5 text-sm"
+                        >
+                          再聊聊
+                        </button>
+                      )}
                     </div>
                   </div>
                 )
@@ -385,19 +547,48 @@ export default function DebateScreen({ question, chars, onEnd }: Props) {
                 </div>
               </div>
             )}
+
+            {fetchStatus === 'loading' && playQueue.length === 0 && !currentItem && (
+              <div className="font-mono-lc text-xs text-[var(--lc-ombre)] flex items-center gap-2 px-1">
+                <span className="pulse-dot">●</span> 圆桌思考中…
+              </div>
+            )}
           </div>
 
-          <div className="shrink-0 flex gap-2 pb-1">
-            <input
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && sendInterjection()}
-              placeholder="随时插话、追问，或直接说「我已有答案」……"
-              className="flex-1 min-w-0 bg-[var(--lc-ivoire-2)] border-2 border-[var(--lc-ink)] px-4 py-3 text-sm outline-none focus:border-[var(--lc-outremer)] placeholder:text-[var(--lc-ombre)]"
-            />
-            <button onClick={sendInterjection} className="lc-btn lc-btn-outremer px-5 py-3 text-sm shrink-0">
-              插话
-            </button>
+          <div className="shrink-0 pb-1">
+            {interjectionMode ? (
+              <div className="flex flex-col gap-2">
+                <div className="font-mono-lc text-[10px] text-[var(--lc-ceruleen)] font-bold">
+                  ⏸ 已暂停，圆桌在等你说完
+                </div>
+                <div className="flex gap-2">
+                  <input
+                    autoFocus
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && sendInterjection()}
+                    placeholder="说说你的想法……"
+                    className="flex-1 min-w-0 bg-[var(--lc-ivoire-2)] border-2 border-[var(--lc-ceruleen)] px-4 py-3 text-sm outline-none placeholder:text-[var(--lc-ombre)]"
+                  />
+                  <button onClick={sendInterjection} className="lc-btn lc-btn-outremer px-5 py-3 text-sm shrink-0">
+                    发送插话
+                  </button>
+                  <button onClick={cancelInterjection} className="lc-btn lc-btn-ivoire px-4 py-3 text-sm shrink-0">
+                    算了，继续吧
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                onClick={openInterjection}
+                disabled={fetchStatus === 'closing'}
+                className={`lc-btn w-full py-3 text-sm disabled:opacity-40 transition-colors ${
+                  graceActive ? 'lc-btn-vermillon' : 'lc-btn-outremer'
+                }`}
+              >
+                {graceActive ? '⏸ 我要插话（现在正好可以）' : '⏸ 我要插话'}
+              </button>
+            )}
           </div>
         </div>
       </div>
