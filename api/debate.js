@@ -214,12 +214,18 @@ function clampConfidence(v) {
   return Math.min(5, Math.max(1, n));
 }
 
-function parseSpeechOutput(rawText, fallbackStance) {
+const SPEECH_KEYS = "inner_thought|stance|confidence|response_type|target|change_mind";
+
+// 解析单条发言。模型偶尔会在正文里用英文直引号（比如引诗）把 JSON 弄坏，
+// 或者把正文放进别的字段名里——尽量把正文捞回来，捞不回来就返回空串交给调用方重试。
+export function parseSpeechOutput(rawText, fallbackStance) {
   const text = extractJson(rawText);
+  const pickStr = (k) => text.match(new RegExp(`"${k}"\\s*:\\s*"([^"]*)"`))?.[1]?.trim() || "";
   try {
     const parsed = JSON.parse(text);
+    const speech = [parsed.speech, parsed.text, parsed.content, parsed["发言"]].find((v) => typeof v === "string" && v.trim()) || "";
     return {
-      speech: parsed.speech || "",
+      speech: speech.trim(),
       innerThought: parsed.inner_thought || "",
       stance: normalizeStance(parsed.stance) || fallbackStance || "MIXED",
       confidence: clampConfidence(parsed.confidence),
@@ -228,18 +234,33 @@ function parseSpeechOutput(rawText, fallbackStance) {
       changeMind: parsed.change_mind || "",
     };
   } catch {
-    const speechRescue = text.match(/"speech"\s*:\s*"([\s\S]*?)"\s*,\s*"/);
-    const stanceRescue = text.match(/"stance"\s*:\s*"(A|B|MIXED)"/i);
+    // 以"下一个已知字段名"作为正文结束的锚点，正文里夹着英文引号也能完整捞回
+    const anchored = text.match(new RegExp(`"speech"\\s*:\\s*"([\\s\\S]*?)"\\s*,\\s*"(?:${SPEECH_KEYS})"`));
+    const tail = text.match(/"speech"\s*:\s*"([\s\S]*?)"\s*}\s*$/);
+    const looksLikeJson = text.trim().startsWith("{");
+    const speech = (anchored?.[1] || tail?.[1] || (looksLikeJson ? "" : rawText)).trim();
+    const target = pickStr("target");
     return {
-      speech: speechRescue ? speechRescue[1].trim() : rawText.trim(),
-      innerThought: "",
-      stance: normalizeStance(stanceRescue?.[1]) || fallbackStance || "MIXED",
-      confidence: 3,
-      responseType: "advance",
-      target: null,
-      changeMind: "",
+      speech,
+      innerThought: pickStr("inner_thought"),
+      stance: normalizeStance(pickStr("stance")) || fallbackStance || "MIXED",
+      confidence: clampConfidence(text.match(/"confidence"\s*:\s*(\d)/)?.[1]),
+      responseType: pickStr("response_type") || "advance",
+      target: target && target !== "null" ? target : null,
+      changeMind: pickStr("change_mind"),
     };
   }
+}
+
+// 生成一条发言：正文为空就同样的上下文再请求一次；两次都空返回 null，这条发言直接不上屏
+async function generateSpeech(systemPrompt, userMessage, meta, fallbackStance) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const raw = await callClaude(systemPrompt, userMessage, { ...meta, attempt });
+    const p = parseSpeechOutput(raw, fallbackStance);
+    if (p.speech) return p;
+    console.warn(`[debate] ${meta.name} 第${meta.round}轮发言正文为空（第${attempt + 1}次），原始输出：`, raw.slice(0, 400));
+  }
+  return null;
 }
 
 function buildTag(round, responseType, target, characterMap) {
@@ -476,11 +497,11 @@ export default async function handler(req, res) {
         characters.map(async (character, idx) => {
           const systemPrompt = buildSystemPrompt(character, question, motion, deriveUsedAnchors(character, history), updatedPrivateMemory[character.id]);
           const userMessage = buildUserMessage({ round, motion, history, stances: {}, character, characters });
-          const raw = await callClaude(systemPrompt, userMessage, { kind: "speech", charIndex: idx, round, name: character.name });
-          return { character, ...parseSpeechOutput(raw, null) };
+          const p = await generateSpeech(systemPrompt, userMessage, { kind: "speech", charIndex: idx, round, name: character.name }, null);
+          return p ? { character, ...p } : null;
         })
       );
-      for (const r of results) {
+      for (const r of results.filter(Boolean)) {
         updatedPrivateMemory[r.character.id].push(r.innerThought);
         const entry = {
           charId: r.character.id,
@@ -525,8 +546,8 @@ export default async function handler(req, res) {
         });
 
         const targets = opponentsFirst(character, characters, liveStances).map((c) => c.id);
-        const raw = await callClaude(systemPrompt, userMessage, { kind: "speech", charIndex: idx, round, name: character.name, targets });
-        const p = parseSpeechOutput(raw, liveStances[character.id]);
+        const p = await generateSpeech(systemPrompt, userMessage, { kind: "speech", charIndex: idx, round, name: character.name, targets }, liveStances[character.id]);
+        if (!p) continue; // 两次都没拿到正文：这位本轮不上屏，立场保持上一轮
 
         // 交锋轮不允许 advance：模型如果还是选了 advance，标签上照实显示"推进论点"，
         // 但不计入"正面交锋"，也就不会帮"分歧已清楚"提前成立

@@ -33,6 +33,10 @@ export function mockCall(meta) {
   if (kind === "advice") {
     return "先把最坏的情况想清楚，再决定你是不是真的想要它。";
   }
+  // MOCK_EMPTY_SPEECH=1：第二位嘉宾开场第一次返回空正文（第二次正常），测重试
+  if (process.env.MOCK_EMPTY_SPEECH === "1" && charIndex === 1 && round === 0 && !meta.attempt) {
+    return JSON.stringify({ speech: "", inner_thought: "", stance: "MIXED", confidence: 3, response_type: "advance", target: null });
+  }
   const SCENARIO = process.env.MOCK_SCENARIO || "settled";
   const stance = (SCRIPTS[SCENARIO] || SCRIPTS.settled)(charIndex, round);
   const speech = `${name}：${LINES[(charIndex + round) % LINES.length]}`.slice(0, 100);

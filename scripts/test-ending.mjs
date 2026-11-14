@@ -97,4 +97,33 @@ assert.equal(e.needNudge, true);
   console.log("frame fallback:", JSON.stringify(out.data.motion));
 }
 
+// 发言解析：正文里夹着英文直引号（引诗）也要完整捞回
+{
+  const { parseSpeechOutput } = await import("../api/debate.js");
+  const broken = '{"speech": "我当年写"竹杖芒鞋轻胜马"，不是硬扛，是饿了先吃饭。", "inner_thought": "有意思", "stance": "MIXED", "confidence": 3, "response_type": "advance", "target": null, "change_mind": "若你连饭都吃不上"}';
+  const p = parseSpeechOutput(broken, null);
+  assert.equal(p.speech, '我当年写"竹杖芒鞋轻胜马"，不是硬扛，是饿了先吃饭。');
+  assert.equal(p.stance, "MIXED");
+  assert.equal(p.changeMind, "若你连饭都吃不上");
+  const keyed = parseSpeechOutput('{"text": "正文换了个字段名", "stance": "A", "confidence": 4}', null);
+  assert.equal(keyed.speech, "正文换了个字段名");
+  assert.equal(parseSpeechOutput('{"speech": "", "stance": "B"}', null).speech, "");
+  console.log("speech parsing: ok");
+}
+
+// 开场有人第一次返回空正文 → 自动重试，三个人都上屏
+{
+  process.env.MOCK_EMPTY_SPEECH = "1";
+  const { default: handler } = await import("../api/debate.js");
+  const out = await new Promise((resolve) => {
+    const res = { code: 200, status(c) { this.code = c; return this; }, json(d) { resolve({ code: this.code, data: d }); } };
+    handler({ method: "POST", body: { phase: "debate", question: "x问题", motion: { motion: "m", a: "a", b: "b" }, characterIds: ["nietzsche", "su_shi", "munger"], round: 0, history: [] } }, res);
+  });
+  delete process.env.MOCK_EMPTY_SPEECH;
+  assert.equal(out.code, 200);
+  assert.equal(out.data.speeches.length, 3);
+  assert.ok(out.data.speeches.every((x) => x.text.trim()));
+  console.log("empty speech retry: ok");
+}
+
 console.log("\nall ending tests passed");

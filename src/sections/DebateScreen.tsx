@@ -284,6 +284,7 @@ export default function DebateScreen({ question, motion, chars, onEnd }: Props) 
     setPlayQueue((q) => [
       ...q,
       ...data.speeches
+        .filter((s) => s.text && s.text.trim())
         .map((s) => {
           const char = charById.get(s.charId)
           return char ? { char, text: s.text, tag: s.tag, stance: (s.stance ?? 'MIXED') as Stance, shiftFrom: s.shiftFrom } : null
