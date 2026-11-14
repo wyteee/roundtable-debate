@@ -3,17 +3,20 @@ import './App.css'
 import { CHARACTERS, type Character } from './data/characters'
 import LandingScreen from './sections/LandingScreen'
 import CastingScreen from './sections/CastingScreen'
-import DebateScreen, { type DebateResult } from './sections/DebateScreen'
+import DebateScreen from './sections/DebateScreen'
+import MotionScreen from './sections/MotionScreen'
+import type { DebateResult, Motion } from './lib/debate'
 import ClosingScreen from './sections/ClosingScreen'
 
-type Screen = 'landing' | 'casting' | 'debate' | 'closing'
+type Screen = 'landing' | 'motion' | 'casting' | 'debate' | 'closing'
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>('landing')
   const [question, setQuestion] = useState('')
   const [selected, setSelected] = useState<string[]>([])
-  // 本场辩论真实结束后拿到的数据（目前是每个角色的收尾高光忠告）
-  const [debateResult, setDebateResult] = useState<DebateResult>({ advice: [] })
+  const [motion, setMotion] = useState<Motion | null>(null)
+  // 本场辩论真实结束后拿到的数据：裁决（最终立场/出处/改主意条件）+ 每人一句忠告
+  const [debateResult, setDebateResult] = useState<DebateResult>({ advice: [], verdict: [], endReason: 'user' })
 
   const toggle = (id: string) => {
     setSelected((s) =>
@@ -28,7 +31,8 @@ export default function App() {
   const restart = () => {
     setQuestion('')
     setSelected([])
-    setDebateResult({ advice: [] })
+    setMotion(null)
+    setDebateResult({ advice: [], verdict: [], endReason: 'user' })
     setScreen('landing')
   }
 
@@ -36,24 +40,38 @@ export default function App() {
     <div className="h-full">
       {screen === 'landing' && (
         <LandingScreen
+          initial={question}
           onSubmit={(q) => {
+            if (q !== question) setMotion(null)
             setQuestion(q)
-            setScreen('casting')
+            setScreen('motion')
           }}
         />
       )}
-      {screen === 'casting' && (
-        <CastingScreen
+      {screen === 'motion' && (
+        <MotionScreen
           question={question}
-          selected={selected}
-          onToggle={toggle}
-          onStart={() => setScreen('debate')}
+          initial={motion}
+          onConfirm={(m) => {
+            setMotion(m)
+            setScreen('casting')
+          }}
           onBack={() => setScreen('landing')}
         />
       )}
-      {screen === 'debate' && (
+      {screen === 'casting' && motion && (
+        <CastingScreen
+          question={motion.motion}
+          selected={selected}
+          onToggle={toggle}
+          onStart={() => setScreen('debate')}
+          onBack={() => setScreen('motion')}
+        />
+      )}
+      {screen === 'debate' && motion && (
         <DebateScreen
           question={question}
+          motion={motion}
           chars={selectedChars}
           onEnd={(result) => {
             setDebateResult(result)
@@ -61,11 +79,11 @@ export default function App() {
           }}
         />
       )}
-      {screen === 'closing' && (
+      {screen === 'closing' && motion && (
         <ClosingScreen
-          question={question}
+          motion={motion}
           chars={selectedChars}
-          advice={debateResult.advice}
+          result={debateResult}
           onRestart={restart}
         />
       )}

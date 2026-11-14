@@ -27,11 +27,11 @@ export default function CastingScreen({
       {/* 顶部：回显问题 */}
       <div className="flex items-start gap-3 mb-8">
         <button onClick={onBack} className="lc-btn lc-btn-ivoire px-3 py-2 text-sm shrink-0">
-          ← 改问题
+          ← 改辩题
         </button>
         <div className="lc-card-flat flex-1 px-4 py-3">
           <div className="font-mono-lc text-[10px] tracking-[0.25em] text-[var(--lc-ombre)] mb-1">
-            TONIGHT'S QUESTION · 今夜的问题
+            TONIGHT'S MOTION · 今夜的辩题
           </div>
           <div className="font-medium leading-snug">「{question}」</div>
         </div>

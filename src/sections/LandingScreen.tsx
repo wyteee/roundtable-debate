@@ -2,13 +2,14 @@ import { useState } from 'react'
 import { CHARACTERS } from '../data/characters'
 
 interface Props {
+  initial?: string
   onSubmit: (question: string) => void
 }
 
 const MAX_LEN = 200
 
-export default function LandingScreen({ onSubmit }: Props) {
-  const [text, setText] = useState('')
+export default function LandingScreen({ initial = '', onSubmit }: Props) {
+  const [text, setText] = useState(initial)
   const [error, setError] = useState('')
 
   const len = text.length
