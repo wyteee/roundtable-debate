@@ -188,7 +188,12 @@ async function callClaude(systemPrompt, userMessage, meta, maxTokens = 800) {
 
   const data = await res.json();
   const textBlocks = data.content.filter((b) => b.type === "text");
-  return textBlocks.map((b) => b.text).join("\n").trim();
+  const text = textBlocks.map((b) => b.text).join("\n").trim();
+  // 被 max_tokens 截断时 JSON 往往不完整，打一条日志方便在 Vercel Logs 里排查
+  if (data.stop_reason === "max_tokens") {
+    console.warn(`[debate] ${meta?.kind} 输出被 max_tokens(${maxTokens}) 截断：`, text.slice(0, 200));
+  }
+  return text;
 }
 
 function extractJson(rawText) {
@@ -318,16 +323,39 @@ function frameSystemPrompt() {
 - 如果用户本来就给了二选一（比如"A还是B"），直接用这两个选项。
 - 如果问题是开放式的（比如"人生的意义是什么"），找出其中最核心的一个两难，把它立成二选一。
 - 保持中立：不要在措辞上偏向任何一边。
+- 用户的问题可能很长、带着很多背景（比如各选项的代价）。不要复述背景，只提炼出那个要做的决定。
 
 只输出一个JSON对象，不要有任何其他文字：{"motion": "...", "a": "...", "b": "..."}
 JSON字符串内不要出现英文直引号，需要引用时用「」。`;
 }
 
+function parseMotion(raw) {
+  try {
+    const parsed = JSON.parse(extractJson(raw));
+    const m = { motion: String(parsed.motion || "").trim(), a: String(parsed.a || "").trim(), b: String(parsed.b || "").trim() };
+    return m.motion && m.a && m.b ? m : null;
+  } catch {
+    // 截断时常见的半截 JSON：逐个字段捞
+    const pick = (k) => raw.match(new RegExp(`"${k}"\\s*:\\s*"([^"]+)"`))?.[1]?.trim() || "";
+    const m = { motion: pick("motion"), a: pick("a"), b: pick("b") };
+    return m.motion && m.a && m.b ? m : null;
+  }
+}
+
+// 立题：最多试两次。还不行就不报错卡死用户——把原问题截短放进辩题框，
+// A/B 留空让用户自己填（needsEdit=true），用户本来就是主持人。
 async function frameMotion(question) {
-  const raw = await callClaude(frameSystemPrompt(), `用户的问题："${question}"`, { kind: "frame" }, 300);
-  const parsed = JSON.parse(extractJson(raw));
-  if (!parsed.motion || !parsed.a || !parsed.b) throw new Error("立题结果缺字段");
-  return { motion: String(parsed.motion), a: String(parsed.a), b: String(parsed.b) };
+  let partialMotion = "";
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const hint = attempt === 0 ? "" : "\n\n上一次的输出无法解析。这次只输出那一个JSON对象，不要任何解释。";
+    const raw = await callClaude(frameSystemPrompt(), `用户的问题："${question}"${hint}`, { kind: "frame", attempt }, 600);
+    const m = parseMotion(raw);
+    if (m) return m;
+    partialMotion ||= raw.match(/"motion"\s*:\s*"([^"]+)"/)?.[1]?.trim() || "";
+    console.warn(`[debate] 立题第${attempt + 1}次解析失败：`, raw.slice(0, 300));
+  }
+  const short = partialMotion || question.replace(/\s+/g, " ").trim();
+  return { motion: short.length > 40 ? short.slice(0, 39) + "…" : short, a: "", b: "", needsEdit: true };
 }
 
 function buildAdviceSystemPrompt(character) {

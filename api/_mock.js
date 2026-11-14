@@ -26,6 +26,8 @@ const LINES = [
 export function mockCall(meta) {
   const { kind, charIndex = 0, round = 0, name = "嘉宾", targets = [] } = meta || {};
   if (kind === "frame") {
+    // MOCK_FRAME=truncated：模拟输出被截断，用来测立题的重试和兜底
+    if (process.env.MOCK_FRAME === "truncated") return '{"motion": "你该留在美国还是回国？", "a": ';
     return JSON.stringify({ motion: "你现在应该辞职去读博吗？", a: "辞职读博", b: "留在原地" });
   }
   if (kind === "advice") {

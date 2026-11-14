@@ -81,4 +81,20 @@ assert.equal(e.shifts.length, 1);
 assert.equal(e.stableRounds, 0);
 assert.equal(e.needNudge, true);
 
+// 立题被截断：两次都解析失败 → 不报错，返回 needsEdit 让用户手填
+{
+  process.env.MOCK_FRAME = "truncated";
+  const { default: handler } = await import("../api/debate.js");
+  const longQ = "我是否应该留在美国，留在美国意味可能找不到工作并且要自费留在这里，但是回国意味着可能能找到一份工作，但是可能不喜欢而且还要加班。";
+  const out = await new Promise((resolve) => {
+    const res = { code: 200, status(c) { this.code = c; return this; }, json(d) { resolve({ code: this.code, data: d }); } };
+    handler({ method: "POST", body: { phase: "frame", question: longQ } }, res);
+  });
+  delete process.env.MOCK_FRAME;
+  assert.equal(out.code, 200);
+  assert.equal(out.data.motion.needsEdit, true);
+  assert.ok(out.data.motion.motion.length <= 40);
+  console.log("frame fallback:", JSON.stringify(out.data.motion));
+}
+
 console.log("\nall ending tests passed");

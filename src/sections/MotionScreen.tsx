@@ -14,6 +14,7 @@ export default function MotionScreen({ question, initial, onConfirm, onBack }: P
   const [motion, setMotion] = useState<Motion | null>(initial)
   const [loading, setLoading] = useState(!initial)
   const [error, setError] = useState<string | null>(null)
+  const [needsEdit, setNeedsEdit] = useState(false)
 
   const frame = async () => {
     setLoading(true)
@@ -26,7 +27,9 @@ export default function MotionScreen({ question, initial, onConfirm, onBack }: P
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok || !data.motion) throw new Error(data.error || `立题失败（状态码 ${res.status}）`)
-      setMotion(data.motion)
+      const { needsEdit: ne, ...m } = data.motion
+      setMotion(m)
+      setNeedsEdit(!!ne)
     } catch (e) {
       setError((e as Error).message)
     } finally {
@@ -81,6 +84,11 @@ export default function MotionScreen({ question, initial, onConfirm, onBack }: P
 
           {!loading && motion && (
             <div className="space-y-5">
+              {needsEdit && (
+                <div className="border-2 border-[var(--lc-ocre)] bg-[var(--lc-ocre)]/15 px-3 py-2 text-sm">
+                  这个问题有点长，没能自动立好题。把辩题改短一点，再填上 A 和 B 两个选项就能开始；也可以点「换一种立法」再试一次。
+                </div>
+              )}
               <label className="block">
                 <span className="font-mono-lc text-[10px] tracking-[0.25em] text-[var(--lc-ombre)]">
                   TONIGHT'S MOTION · 辩题
