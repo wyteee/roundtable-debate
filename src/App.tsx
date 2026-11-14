@@ -6,6 +6,7 @@ import CastingScreen from './sections/CastingScreen'
 import DebateScreen from './sections/DebateScreen'
 import MotionScreen from './sections/MotionScreen'
 import type { DebateResult, Motion } from './lib/debate'
+import { useI18n, type Lang } from './lib/i18n'
 import ClosingScreen from './sections/ClosingScreen'
 
 type Screen = 'landing' | 'motion' | 'casting' | 'debate' | 'closing'
@@ -14,7 +15,10 @@ export default function App() {
   const [screen, setScreen] = useState<Screen>('landing')
   const [question, setQuestion] = useState('')
   const [selected, setSelected] = useState<string[]>([])
+  const { lang } = useI18n()
   const [motion, setMotion] = useState<Motion | null>(null)
+  // 立好的辩题属于某一种语言；回到首页换了语言再提交，就要重新立题
+  const [motionLang, setMotionLang] = useState<Lang>(lang)
   // 本场辩论真实结束后拿到的数据：裁决（最终立场/出处/改主意条件）+ 每人一句忠告
   const [debateResult, setDebateResult] = useState<DebateResult>({ advice: [], verdict: [], endReason: 'user' })
 
@@ -42,7 +46,7 @@ export default function App() {
         <LandingScreen
           initial={question}
           onSubmit={(q) => {
-            if (q !== question) setMotion(null)
+            if (q !== question || lang !== motionLang) setMotion(null)
             setQuestion(q)
             setScreen('motion')
           }}
@@ -54,6 +58,7 @@ export default function App() {
           initial={motion}
           onConfirm={(m) => {
             setMotion(m)
+            setMotionLang(lang)
             setScreen('casting')
           }}
           onBack={() => setScreen('landing')}

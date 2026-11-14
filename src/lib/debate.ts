@@ -50,11 +50,11 @@ export interface DebateResult {
   endReason: EndReason
 }
 
-export function stanceLabel(motion: Motion, s: Stance | null | undefined): string {
+export function stanceLabel(motion: Motion, s: Stance | null | undefined, lang: 'zh' | 'en' = 'zh'): string {
   if (s === 'A') return motion.a
   if (s === 'B') return motion.b
-  if (s === 'MIXED') return '有条件'
-  return '未表态'
+  if (s === 'MIXED') return lang === 'en' ? 'Conditional' : '有条件'
+  return lang === 'en' ? 'Undecided' : '未表态'
 }
 
 // 立场配色：刻意避开嘉宾自己的主色，A/B/有条件三色一眼可分
@@ -62,13 +62,4 @@ export const STANCE_COLOR: Record<Stance, string> = {
   A: 'var(--lc-outremer)',
   B: 'var(--lc-vert)',
   MIXED: 'var(--lc-ocre)',
-}
-
-export const END_REASON_TEXT: Record<EndReason, string> = {
-  consensus: '三人达成共识',
-  settled: '分歧已经清楚',
-  looping: '圆桌开始绕圈',
-  budget: '节目时间到',
-  hardcap: '达到 10 轮上限',
-  user: '你喊了停',
 }

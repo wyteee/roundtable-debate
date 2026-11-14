@@ -17,6 +17,17 @@ export interface Character {
   replyUser: string
   /** 结辩高光（摘录收口） */
   advice: string
+  /** 英文版展示用：名字、选角卡台词、忠告兜底文案 */
+  nameEn: string
+  quoteEn: string
+  adviceEn: string
+}
+
+/** 按当前语言取展示用的名字 / 台词 / 兜底忠告 */
+export function charText(c: Character, lang: 'zh' | 'en') {
+  return lang === 'en'
+    ? { name: c.nameEn, quote: c.quoteEn, advice: c.adviceEn }
+    : { name: c.name, quote: c.quote, advice: c.advice }
 }
 
 export const CHARACTERS: Character[] = [
@@ -37,6 +48,9 @@ export const CHARACTERS: Character[] = [
     replyUser:
       '插话很好，说明你还活着。但你这话里最脆弱的是那个「万一」——万一，是懦夫最爱的词。',
     advice: '别问该不该，问你敢不敢。成为你本来是的那个人。',
+    nameEn: 'Nietzsche',
+    quoteEn: '\'What does not kill me makes me stronger.\'',
+    adviceEn: 'Don\'t ask whether you should. Ask whether you dare. Become who you are.',
   },
   {
     id: 'machiavelli',
@@ -55,6 +69,9 @@ export const CHARACTERS: Character[] = [
     replyUser:
       '你这个设想漏了一样东西：别人的反应。任何不考虑对方反制的计划，都只是愿望。',
     advice: '少问「该不该」，多问「行不行」。先看清局势，再动用勇气。',
+    nameEn: 'Machiavelli',
+    quoteEn: '\'It is safer to be feared than loved.\'',
+    adviceEn: 'Ask less \'should I\' and more \'can I\'. Read the board, then bring the nerve.',
   },
   {
     id: 'jobs',
@@ -73,6 +90,9 @@ export const CHARACTERS: Character[] = [
     replyUser:
       '停。你刚才用了一堆词，但我没听见你真正想要什么。删掉所有修饰，剩下那个词是什么？',
     advice: '删掉百分之九十的选项。把剩下的那个，做到让自己骄傲。',
+    nameEn: 'Steve Jobs',
+    quoteEn: '\'Stay hungry. Stay foolish.\'',
+    adviceEn: 'Cut ninety percent of the options. Make the one that\'s left something you\'re proud of.',
   },
   {
     id: 'beauvoir',
@@ -91,6 +111,9 @@ export const CHARACTERS: Character[] = [
     replyUser:
       '你说「没办法」——这三个字最方便，也最值得怀疑。谁告诉你没办法的？',
     advice: '警惕一切「本该如此」。你的处境可谈，你的自由不可让。',
+    nameEn: 'Beauvoir',
+    quoteEn: '\'One is not born, but rather becomes, a woman.\'',
+    adviceEn: 'Distrust every \'that\'s just how it is\'. Your situation is negotiable; your freedom isn\'t.',
   },
   {
     id: 'munger',
@@ -109,6 +132,9 @@ export const CHARACTERS: Character[] = [
     replyUser:
       '我只问一句：你这个判断的赔率是多少？说不上来，就是在赌情绪。',
     advice: '列出会让它彻底失败的做法，然后坚决不做。理性是最好的护城河。',
+    nameEn: 'Munger',
+    quoteEn: '\'Invert, always invert.\'',
+    adviceEn: 'List the ways to guarantee failure, then refuse to do them.',
   },
   {
     id: 'su_shi',
@@ -127,6 +153,9 @@ export const CHARACTERS: Character[] = [
     replyUser:
       '你这话说得紧绷。先松一口气——事情未必有你想的那么重，是你攥得太紧了。',
     advice: '也无风雨也无晴。把眼前的事做好，把心里的结放宽。',
+    nameEn: 'Su Shi',
+    quoteEn: '\'Bamboo staff, straw sandals: lighter than a horse. Who\'s afraid? A rain cape through a lifetime of mist.\'',
+    adviceEn: 'Neither storm nor sunshine. Do today\'s work well and loosen the knot in your chest.',
   },
   {
     id: 'napoleon',
@@ -145,6 +174,9 @@ export const CHARACTERS: Character[] = [
     replyUser:
       '你提到了障碍。很好，把它画在地图上——然后告诉我，你打算从哪一侧突破？',
     advice: '定一个值得的目标，然后把全部筹码压上去。胜利属于最敢的人。',
+    nameEn: 'Napoleon',
+    quoteEn: '\'Impossible is a word found only in the dictionary of fools.\'',
+    adviceEn: 'Pick a target worth having, then commit everything. Victory belongs to the bold.',
   },
   {
     id: 'marx',
@@ -163,5 +195,8 @@ export const CHARACTERS: Character[] = [
     replyUser:
       '你的困惑很真实，但你把它当成私人烦恼了。往四周看看——多少人跟你一模一样？这不是偶然。',
     advice: '别只解释你的处境，去认清它、然后改变它。条件变了，问题才会变。',
+    nameEn: 'Marx',
+    quoteEn: '\'The philosophers have only interpreted the world; the point is to change it.\'',
+    adviceEn: 'Don\'t just explain your situation. See it clearly, then change it.',
   },
 ]

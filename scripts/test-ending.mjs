@@ -126,4 +126,39 @@ assert.equal(e.needNudge, true);
   console.log("empty speech retry: ok");
 }
 
+// 英文：同一套流程，标签、插话人名、人物卡都换成英文
+{
+  const { default: handler } = await import("../api/debate.js");
+  const call = (body) =>
+    new Promise((resolve) => {
+      const res = { code: 200, status(c) { this.code = c; return this; }, json(d) { resolve({ code: this.code, data: d }); } };
+      handler({ method: "POST", body: { lang: "en", ...body } }, res);
+    });
+  process.env.MOCK_SCENARIO = "settled";
+  const base = { question: "Should I quit my job for a PhD?", characterIds: ["nietzsche", "munger", "su_shi"] };
+  const { data: f } = await call({ ...base, phase: "frame" });
+  assert.equal(f.motion.a, "Quit for the PhD");
+  const { data: r0 } = await call({ ...base, motion: f.motion, phase: "debate", round: 0, history: [] });
+  assert.deepEqual(r0.speeches.map((s) => s.name), ["Nietzsche", "Munger", "Su Shi"]);
+  assert.ok(r0.speeches.every((s) => s.tag === "Opening"));
+  const hist = r0.speeches.map(({ tag, shiftFrom, ...h }) => h);
+  const { data: r1 } = await call({ ...base, motion: f.motion, phase: "debate", round: 1, history: hist, privateMemory: r0.privateMemory, interjection: "But I have no savings" });
+  assert.equal(r1.interjectionEntry.name, "You");
+  assert.ok(r1.speeches.some((s) => s.tag.startsWith("Rebuts ")), r1.speeches.map((s) => s.tag).join(","));
+  const { data: c } = await call({ ...base, motion: f.motion, phase: "closing", history: [...hist, ...r1.speeches.map(({ tag, shiftFrom, ...h }) => h)] });
+  assert.equal(c.advice.length, 3);
+  // 八张英文人物卡字段齐全、关系覆盖其余七人
+  const fs = await import("node:fs");
+  const ids = ["nietzsche", "machiavelli", "jobs", "beauvoir", "munger", "su_shi", "napoleon", "marx"];
+  for (const id of ids) {
+    const zh = JSON.parse(fs.readFileSync(`characters/${id}.json`, "utf-8"));
+    const en = JSON.parse(fs.readFileSync(`characters/en/${id}.json`, "utf-8"));
+    assert.deepEqual(Object.keys(en).sort(), Object.keys(zh).sort(), id);
+    assert.deepEqual(Object.keys(en.relations).sort(), Object.keys(zh.relations).sort(), id);
+    assert.equal(en.arsenal.length, zh.arsenal.length, id);
+    assert.ok(!/[\u4e00-\u9fff]/.test(JSON.stringify(en)), `${id} en card contains Chinese`);
+  }
+  console.log("english flow + 8 english cards: ok");
+}
+
 console.log("\nall ending tests passed");

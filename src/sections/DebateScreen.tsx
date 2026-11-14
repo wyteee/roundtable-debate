@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { Character } from '../data/characters'
+import { charText, type Character } from '../data/characters'
+import { useI18n } from '../lib/i18n'
 import {
   STANCE_COLOR,
   stanceLabel,
@@ -62,9 +63,12 @@ type FetchStatus = 'idle' | 'loading' | 'awaiting-user' | 'closing' | 'error'
 // ---- 节奏：按阅读速度来，而不是按动画好看来 ----
 // 中文正常阅读约每秒 5-8 字。打字约每秒 9 字，打完后再按字数留阅读时间，
 // 一条 100 字的发言总共停留约 17 秒；读得快的人按「下一位 ▶」或空格跳过。
+// 英文按字符算：正常阅读约每秒 15-20 个字符，打字约每秒 25 个字符，再按长度留阅读时间。
 const TICK_MS = 50
-const TYPE_MS_PER_CHAR = 110
-const READ_MS_PER_CHAR = 60
+const PACE = {
+  zh: { typeMsPerChar: 110, readMsPerChar: 60 },
+  en: { typeMsPerChar: 40, readMsPerChar: 25 },
+} as const
 const READ_MIN_MS = 2500
 const READ_MAX_MS = 9000
 // 每轮播完后的插话窗口（沿用之前的实测结论：6 秒）
@@ -75,8 +79,8 @@ const OVERTIME_MS = 60 * 1000
 // 用户在结束横幅上选了"再聊聊"之后，这么多轮之内不再弹同一种结局
 const END_COOLDOWN_ROUNDS = 2
 
-function readMs(len: number) {
-  return Math.min(READ_MAX_MS, Math.max(READ_MIN_MS, len * READ_MS_PER_CHAR))
+function readMs(len: number, perChar: number) {
+  return Math.min(READ_MAX_MS, Math.max(READ_MIN_MS, len * perChar))
 }
 
 function fmt(ms: number) {
@@ -85,6 +89,10 @@ function fmt(ms: number) {
 }
 
 export default function DebateScreen({ question, motion, chars, onEnd }: Props) {
+  const { t, lang, q } = useI18n()
+  const pace = PACE[lang]
+  const nm = (c: Character) => charText(c, lang).name
+  const sl = (s: Stance | null | undefined) => stanceLabel(motion, s, lang)
   const [messages, setMessages] = useState<Msg[]>([])
   const [playQueue, setPlayQueue] = useState<PlayItem[]>([])
   const [currentItem, setCurrentItem] = useState<PlayItem | null>(null)
@@ -151,7 +159,7 @@ export default function DebateScreen({ question, motion, chars, onEnd }: Props) 
             id: ++idRef.current,
             kind: 'shift',
             char: item.char,
-            text: `${item.char.name} 改变了立场：${stanceLabel(motion, item.shiftFrom)} → ${stanceLabel(motion, item.stance)}`,
+            text: t('debate.shift', { name: nm(item.char), from: sl(item.shiftFrom), to: sl(item.stance) }),
             stance: item.stance,
           })
         }
@@ -161,18 +169,19 @@ export default function DebateScreen({ question, motion, chars, onEnd }: Props) 
       setCurrentItem(null)
       setShown('')
     },
-    [motion],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [motion, lang],
   )
 
   useEffect(() => {
     if (!currentItem) return
-    const typeMs = currentItem.text.length * TYPE_MS_PER_CHAR
-    const totalMs = typeMs + readMs(currentItem.text.length)
+    const typeMs = currentItem.text.length * pace.typeMsPerChar
+    const totalMs = typeMs + readMs(currentItem.text.length, pace.readMsPerChar)
     const timer = setInterval(() => {
       if (pausedRef.current) return
       elapsedRef.current += TICK_MS
       clockRef.current += TICK_MS
-      const n = Math.min(currentItem.text.length, Math.floor(elapsedRef.current / TYPE_MS_PER_CHAR))
+      const n = Math.min(currentItem.text.length, Math.floor(elapsedRef.current / pace.typeMsPerChar))
       setShown(currentItem.text.slice(0, n))
       if (elapsedRef.current % 1000 < TICK_MS) setClockMs(clockRef.current)
       if (elapsedRef.current >= totalMs) {
@@ -182,19 +191,19 @@ export default function DebateScreen({ question, motion, chars, onEnd }: Props) 
       }
     }, TICK_MS)
     return () => clearInterval(timer)
-  }, [currentItem, finishItem])
+  }, [currentItem, finishItem, pace])
 
   // 「下一位 ▶」：还在打字 → 直接显示全文进入阅读；已经在阅读 → 立刻下一位
   const skip = useCallback(() => {
     if (!currentItem) return
-    const typeMs = currentItem.text.length * TYPE_MS_PER_CHAR
+    const typeMs = currentItem.text.length * pace.typeMsPerChar
     if (elapsedRef.current < typeMs) {
       elapsedRef.current = typeMs
       setShown(currentItem.text)
     } else {
       finishItem(currentItem)
     }
-  }, [currentItem, finishItem])
+  }, [currentItem, finishItem, pace])
 
   const togglePause = useCallback(() => {
     pausedRef.current = !pausedRef.current
@@ -233,6 +242,7 @@ export default function DebateScreen({ question, motion, chars, onEnd }: Props) 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           phase: 'debate',
+          lang,
           question,
           motion,
           characterIds: chars.map((c) => c.id),
@@ -246,7 +256,7 @@ export default function DebateScreen({ question, motion, chars, onEnd }: Props) 
         signal: controller.signal,
       })
       const data = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(data.error || `接口请求失败（状态码 ${res.status}）`)
+      if (!res.ok) throw new Error(data.error || t('debate.reqFailed', { status: res.status }))
       if (inflightRef.current?.controller !== controller) return null // 已被丢弃
       inflightRef.current = null
       if (interjection) pendingInterjectionRef.current = null
@@ -254,7 +264,7 @@ export default function DebateScreen({ question, motion, chars, onEnd }: Props) 
     } catch (err) {
       if (inflightRef.current?.controller === controller) inflightRef.current = null
       if ((err as Error).name === 'AbortError') return null
-      setConnectionError((err as Error).message || '连接中断，请稍后重试')
+      setConnectionError((err as Error).message || t('debate.connLost'))
       setFetchStatus('error')
       return null
     }
@@ -341,6 +351,7 @@ export default function DebateScreen({ question, motion, chars, onEnd }: Props) 
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           phase: 'closing',
+          lang,
           question,
           motion,
           characterIds: chars.map((c) => c.id),
@@ -349,13 +360,13 @@ export default function DebateScreen({ question, motion, chars, onEnd }: Props) 
         signal: controller.signal,
       })
       const data = await res.json().catch(() => ({}))
-      if (!res.ok) throw new Error(data.error || `收尾请求失败（状态码 ${res.status}）`)
+      if (!res.ok) throw new Error(data.error || t('debate.closeFailed', { status: res.status }))
       if (endedRef.current) return
       endedRef.current = true
       onEnd({ advice: data.advice ?? [], verdict: data.verdict ?? [], endReason })
     } catch (err) {
       if ((err as Error).name === 'AbortError') return
-      setConnectionError((err as Error).message || '收尾请求失败，请重试')
+      setConnectionError((err as Error).message || t('debate.closeRetry'))
       setFetchStatus('error')
     }
   }
@@ -375,26 +386,26 @@ export default function DebateScreen({ question, motion, chars, onEnd }: Props) 
 
   // ---------------- 结束标准 → 横幅文案 ----------------
 
-  const names = (ids: string[]) => ids.map((id) => charById.get(id)?.name ?? id).join('、')
+  const names = (ids: string[]) => ids.map((id) => { const c = charById.get(id); return c ? nm(c) : id }).join(t('debate.listSep'))
 
   const endBannerText = (reason: EndReason, ending: Ending | null): string => {
     if (reason === 'consensus' && ending) {
       const s = ending.stances[chars[0].id]
-      return `三人都站到了「${stanceLabel(motion, s)}」——提醒过有没有异议，没人反悔。这是共识。`
+      return t('banner.consensus', { side: sl(s) })
     }
     if (reason === 'settled' && ending) {
       const groups = (['A', 'B', 'MIXED'] as Stance[])
         .map((st) => ({ st, ids: chars.map((c) => c.id).filter((id) => ending.stances[id] === st) }))
         .filter((g) => g.ids.length)
-        .map((g) => `${names(g.ids)}「${stanceLabel(motion, g.st)}」`)
-      return `分歧已经清楚：${groups.join(' vs ')}。交过手了，连续两轮没人松口。`
+        .map((g) => t('banner.settledGroup', { names: names(g.ids), side: sl(g.st) }))
+      return t('banner.settled', { groups: groups.join(' vs ') })
     }
     if (reason === 'looping' && ending) {
       const pair = ending.unengagedPairs[0]
-      return `圆桌在绕圈：连续三轮没人改立场${pair ? `，${names(pair)}也一直没正面交过手` : ''}。`
+      return t('banner.looping', { pair: pair ? names(pair) : '' })
     }
-    if (reason === 'budget') return `节目时间到了（${fmt(budgetRef.current)}）。要现在听裁决吗？`
-    return '圆桌已经聊了 10 轮，该收尾了。'
+    if (reason === 'budget') return t('banner.budget', { time: fmt(budgetRef.current) })
+    return t('banner.hardcap')
   }
 
   const pushBanner = (reason: EndReason, canContinue: boolean) => {
@@ -520,12 +531,12 @@ export default function DebateScreen({ question, motion, chars, onEnd }: Props) 
 
   const roundLabel =
     fetchStatus === 'closing'
-      ? '正在整理裁决…'
+      ? t('debate.closing')
       : playedRound === null
-        ? '准备开场'
+        ? t('debate.preparing')
         : playedRound === 0
-          ? '第 0 轮 · 开场'
-          : `第 ${playedRound} 轮 · 交锋`
+          ? t('debate.round0')
+          : t('debate.round', { n: playedRound })
 
   const speakingId = currentItem?.char.id ?? null
   const budgetPct = Math.min(100, (clockMs / budgetMs) * 100)
@@ -536,10 +547,10 @@ export default function DebateScreen({ question, motion, chars, onEnd }: Props) 
         className={`font-mono-lc ${small ? 'text-[9px] px-1' : 'text-[10px] px-1.5'} py-px border font-bold text-[var(--lc-ivoire)] whitespace-nowrap`}
         style={{ background: STANCE_COLOR[s], borderColor: STANCE_COLOR[s] }}
       >
-        {s === 'MIXED' ? '有条件' : `${s}·${stanceLabel(motion, s)}`}
+        {s === 'MIXED' ? sl(s) : `${s}·${sl(s)}`}
       </span>
     ) : (
-      <span className={`font-mono-lc ${small ? 'text-[9px]' : 'text-[10px]'} text-[var(--lc-ombre)]`}>未表态</span>
+      <span className={`font-mono-lc ${small ? 'text-[9px]' : 'text-[10px]'} text-[var(--lc-ombre)]`}>{sl(null)}</span>
     )
 
   return (
@@ -551,7 +562,7 @@ export default function DebateScreen({ question, motion, chars, onEnd }: Props) 
           </span>
           <div className="flex-1 min-w-0 hidden sm:block">
             <div className="text-sm font-medium truncate" title={question}>
-              「{motion.motion}」
+              {q(motion.motion)}
             </div>
             <div className="font-mono-lc text-[10px] truncate">
               <span style={{ color: STANCE_COLOR.A }}>A·{motion.a}</span>
@@ -559,7 +570,7 @@ export default function DebateScreen({ question, motion, chars, onEnd }: Props) 
               <span style={{ color: STANCE_COLOR.B }}>B·{motion.b}</span>
             </div>
           </div>
-          <div className="hidden md:flex flex-col items-end gap-1 shrink-0 w-28" title="节目时长：只计发言播放的时间">
+          <div className="hidden md:flex flex-col items-end gap-1 shrink-0 w-28" title={t('debate.clockTitle')}>
             <span className="font-mono-lc text-[10px] text-[var(--lc-ombre)]">
               {fmt(clockMs)} / {fmt(budgetMs)}
             </span>
@@ -568,7 +579,7 @@ export default function DebateScreen({ question, motion, chars, onEnd }: Props) 
             </div>
           </div>
           <button onClick={handleEnd} className="lc-btn lc-btn-vermillon px-3 py-1.5 text-sm shrink-0">
-            我已有答案 · 听裁决
+            {t('debate.endNow')}
           </button>
         </div>
       </div>
@@ -578,7 +589,7 @@ export default function DebateScreen({ question, motion, chars, onEnd }: Props) 
           <div className="border-2 border-[var(--lc-vermillon)] bg-[var(--lc-vermillon)]/10 px-4 py-2 text-sm flex items-center justify-between gap-3">
             <span>{connectionError}</span>
             <button onClick={handleRetry} className="lc-btn lc-btn-outremer px-3 py-1 text-xs shrink-0">
-              重试
+              {t('debate.retry')}
             </button>
           </div>
         </div>
@@ -588,7 +599,7 @@ export default function DebateScreen({ question, motion, chars, onEnd }: Props) 
       <div className="md:hidden max-w-6xl mx-auto w-full px-4 pt-3 flex gap-2 overflow-x-auto">
         {chars.map((c) => (
           <div key={c.id} className="flex items-center gap-1.5 border-2 border-[var(--lc-ink)] bg-[var(--lc-ivoire-2)] px-2 py-1 shrink-0">
-            <img src={c.avatar} alt={c.name} className="pixelated w-6 h-6" />
+            <img src={c.avatar} alt={nm(c)} className="pixelated w-6 h-6" />
             <StanceChip s={stances[c.id]} small />
           </div>
         ))}
@@ -608,26 +619,26 @@ export default function DebateScreen({ question, motion, chars, onEnd }: Props) 
                   className="w-12 h-12 border-2 shrink-0 overflow-hidden bg-[var(--lc-ivoire)]"
                   style={{ borderColor: speaking ? c.color : 'var(--lc-ink)' }}
                 >
-                  <img src={c.avatar} alt={c.name} className="pixelated w-full h-full object-cover" />
+                  <img src={c.avatar} alt={nm(c)} className="pixelated w-full h-full object-cover" />
                 </div>
                 <div className="min-w-0 space-y-1">
-                  <div className="font-bold text-sm">{c.name}</div>
+                  <div className="font-bold text-sm">{nm(c)}</div>
                   <StanceChip s={stances[c.id]} />
                   {speaking ? (
                     <div className="font-mono-lc text-[10px] flex items-center gap-1" style={{ color: c.color }}>
-                      <span className="pulse-dot">●</span> 正在发言
+                      <span className="pulse-dot">●</span> {t('debate.speaking')}
                     </div>
                   ) : (
-                    <div className="font-mono-lc text-[10px] text-[var(--lc-ombre)]">○ 等待中</div>
+                    <div className="font-mono-lc text-[10px] text-[var(--lc-ombre)]">{t('debate.waiting')}</div>
                   )}
                 </div>
               </div>
             )
           })}
           <div className="font-mono-lc text-[10px] text-[var(--lc-ombre)] leading-relaxed mt-auto">
-            立场随发言实时更新
+            {t('debate.sideNote1')}
             <br />
-            空格键 = 下一位
+            {t('debate.sideNote2')}
           </div>
         </div>
 
@@ -638,15 +649,15 @@ export default function DebateScreen({ question, motion, chars, onEnd }: Props) 
                 if (m.resolved) return null
                 return (
                   <div key={m.id} className="msg-in border-2 border-[var(--lc-ink)] bg-[var(--lc-ocre)] px-4 py-3 flex items-center gap-3 flex-wrap">
-                    <span className="font-mono-lc text-xs font-bold shrink-0">⚑ 结束信号</span>
+                    <span className="font-mono-lc text-xs font-bold shrink-0">{t('debate.endSignal')}</span>
                     <span className="text-sm flex-1 min-w-[200px]">{m.text}</span>
                     <div className="flex gap-2">
                       <button onClick={() => handleBannerEnd(m)} className="lc-btn lc-btn-outremer px-3 py-1.5 text-sm">
-                        听裁决 →
+                        {t('debate.toVerdict')}
                       </button>
                       {m.canContinue && (
                         <button onClick={() => handleBannerContinue(m)} className="lc-btn lc-btn-ivoire px-3 py-1.5 text-sm">
-                          {m.reason === 'budget' ? '加时一分钟' : '再聊聊'}
+                          {m.reason === 'budget' ? t('debate.overtime') : t('debate.continue')}
                         </button>
                       )}
                     </div>
@@ -671,7 +682,7 @@ export default function DebateScreen({ question, motion, chars, onEnd }: Props) 
                 return (
                   <div key={m.id} className="msg-in flex justify-end">
                     <div className="max-w-[85%] border-2 border-[var(--lc-ceruleen)] bg-[var(--lc-ceruleen)]/10 px-4 py-3">
-                      <div className="font-mono-lc text-[10px] text-[var(--lc-ceruleen)] font-bold mb-1">你插话了</div>
+                      <div className="font-mono-lc text-[10px] text-[var(--lc-ceruleen)] font-bold mb-1">{t('debate.youInterjected')}</div>
                       <p className="font-pixel-cn text-xs" style={{ lineHeight: 1.9 }}>
                         {m.text}
                       </p>
@@ -683,12 +694,12 @@ export default function DebateScreen({ question, motion, chars, onEnd }: Props) 
               return (
                 <div key={m.id} className="msg-in flex gap-3">
                   <div className="w-10 h-10 border-2 shrink-0 overflow-hidden bg-[var(--lc-ivoire-2)]" style={{ borderColor: m.char!.color }}>
-                    <img src={m.char!.avatar} alt={m.char!.name} className="pixelated w-full h-full object-cover" />
+                    <img src={m.char!.avatar} alt={nm(m.char!)} className="pixelated w-full h-full object-cover" />
                   </div>
                   <div className="lc-card-flat max-w-[85%] px-4 py-3">
                     <div className="flex items-center gap-2 mb-1 flex-wrap">
                       <span className="font-bold text-sm" style={{ color: m.char!.color }}>
-                        {m.char!.name}
+                        {nm(m.char!)}
                       </span>
                       {m.tag && (
                         <span className="font-mono-lc text-[10px] border border-[var(--lc-ink)] px-1.5 py-px bg-[var(--lc-ivoire)]">{m.tag}</span>
@@ -706,12 +717,12 @@ export default function DebateScreen({ question, motion, chars, onEnd }: Props) 
             {currentItem && (
               <div className="flex gap-3">
                 <div className="w-10 h-10 border-2 shrink-0 overflow-hidden bg-[var(--lc-ivoire-2)]" style={{ borderColor: currentItem.char.color }}>
-                  <img src={currentItem.char.avatar} alt={currentItem.char.name} className="pixelated w-full h-full object-cover" />
+                  <img src={currentItem.char.avatar} alt={nm(currentItem.char)} className="pixelated w-full h-full object-cover" />
                 </div>
                 <div className="lc-card-flat max-w-[85%] px-4 py-3">
                   <div className="flex items-center gap-2 mb-1 flex-wrap">
                     <span className="font-bold text-sm" style={{ color: currentItem.char.color }}>
-                      {currentItem.char.name}
+                      {nm(currentItem.char)}
                     </span>
                     <span className="font-mono-lc text-[10px] border border-[var(--lc-ink)] px-1.5 py-px bg-[var(--lc-ivoire)]">{currentItem.tag}</span>
                   </div>
@@ -724,7 +735,7 @@ export default function DebateScreen({ question, motion, chars, onEnd }: Props) 
 
             {fetchStatus === 'loading' && playQueue.length === 0 && !currentItem && (
               <div className="font-mono-lc text-xs text-[var(--lc-ombre)] flex items-center gap-2 px-1">
-                <span className="pulse-dot">●</span> 圆桌思考中…
+                <span className="pulse-dot">●</span> {t('debate.thinking')}
               </div>
             )}
           </div>
@@ -732,21 +743,21 @@ export default function DebateScreen({ question, motion, chars, onEnd }: Props) 
           <div className="shrink-0 pb-1">
             {interjectionMode ? (
               <div className="flex flex-col gap-2">
-                <div className="font-mono-lc text-[10px] text-[var(--lc-ceruleen)] font-bold">⏸ 已暂停，圆桌在等你说完</div>
+                <div className="font-mono-lc text-[10px] text-[var(--lc-ceruleen)] font-bold">{t('debate.pausedForYou')}</div>
                 <div className="flex gap-2">
                   <input
                     autoFocus
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
                     onKeyDown={(e) => e.key === 'Enter' && sendInterjection()}
-                    placeholder="说说你的想法……"
+                    placeholder={t('debate.interjectPlaceholder')}
                     className="flex-1 min-w-0 bg-[var(--lc-ivoire-2)] border-2 border-[var(--lc-ceruleen)] px-4 py-3 text-sm outline-none placeholder:text-[var(--lc-ombre)]"
                   />
                   <button onClick={sendInterjection} className="lc-btn lc-btn-outremer px-5 py-3 text-sm shrink-0">
-                    发送插话
+                    {t('debate.send')}
                   </button>
                   <button onClick={cancelInterjection} className="lc-btn lc-btn-ivoire px-4 py-3 text-sm shrink-0">
-                    算了，继续吧
+                    {t('debate.cancel')}
                   </button>
                 </div>
               </div>
@@ -756,24 +767,24 @@ export default function DebateScreen({ question, motion, chars, onEnd }: Props) 
                   onClick={togglePause}
                   disabled={fetchStatus === 'closing'}
                   className="lc-btn lc-btn-ivoire px-3 sm:px-4 py-3 text-sm shrink-0 disabled:opacity-40"
-                  title="暂停播放"
+                  title={t('debate.pauseTitle')}
                 >
-                  {paused ? '▶' : '❚❚'}<span className="hidden sm:inline"> {paused ? '继续' : '暂停'}</span>
+                  {paused ? '▶' : '❚❚'}<span className="hidden sm:inline"> {paused ? t('debate.resume') : t('debate.pause')}</span>
                 </button>
                 <button
                   onClick={skip}
                   disabled={!currentItem}
                   className="lc-btn lc-btn-ivoire px-4 py-3 text-sm shrink-0 disabled:opacity-40"
-                  title="空格键"
+                  title={t('debate.nextTitle')}
                 >
-                  <span className="hidden sm:inline">下一位 </span>▶
+                  <span className="hidden sm:inline">{t('debate.next')} </span>▶
                 </button>
                 <button
                   onClick={openInterjection}
                   disabled={fetchStatus === 'closing'}
                   className={`lc-btn flex-1 py-3 text-sm disabled:opacity-40 transition-colors ${graceActive ? 'lc-btn-vermillon' : 'lc-btn-outremer'}`}
                 >
-                  我要插话{graceActive && <span className="hidden sm:inline">（现在正好可以）</span>}
+                  {t('debate.interject')}{graceActive && <span className="hidden sm:inline">{t('debate.interjectNow')}</span>}
                 </button>
               </div>
             )}
