@@ -16,6 +16,10 @@ Roundtable is a multi-agent debate app. You bring a decision you're stuck on ("S
 
 The whole product runs in Chinese and English.
 
+![Verdict from a real debate: Su Shi and Beauvoir 'conditional', Jobs 'stay in the US'](docs/screenshots/verdict-en.png)
+
+<sub>A real run: "Should you stay in the US job hunting or return to China?" Each guest's final side, the advice, the line from the debate that backs it, and what would change their mind.</sub>
+
 ## The product problem I worked on
 
 The first version produced *three parallel opinions*, not a debate. Each figure answered the question in their own voice, the conversation drifted away from the user's question, and it stopped after a fixed number of rounds whether or not anything had been settled. Reading the code showed why:
@@ -62,7 +66,8 @@ Landing ─▶ Motion (frame) ─▶ Casting (3 of 8) ─▶ Debate rounds ─�
                                           looping / keep going
 ```
 
-- **Frontend:** React + Vite + TypeScript + Tailwind; share card exported with html2canvas.
+- **Design:** the UI and first frontend version were designed and generated with **Kimi Design**, then iterated in code. The v3 screens (motion card, stance tags, verdict card) were built by hand in the same visual language.
+- **Frontend:** React 19 + Vite + TypeScript + Tailwind (shadcn/ui); share card exported with html2canvas.
 - **Backend:** one Vercel Function, `POST /api/debate`, stateless. The client sends the history, private memory and motion on every request.
 - **Model:** Claude via the Anthropic Messages API, structured JSON output with defensive parsing (retries on empty or truncated output).
 - **Character cards are the product.** `characters/*.json` (Chinese) and `characters/en/*.json` (English) share one schema: creed, bio, voice, taboos, arsenal (arguments + anchors), relations to the other seven, example dialogues. English cards are rewritten for English voice, not translated line by line.
@@ -100,6 +105,8 @@ For real debates, set `CLAUDE_API_KEY` in your Vercel project's environment vari
 
 ![首页](docs/screenshots/landing-zh.png)
 
+真实一场的裁决页（英文版）见上方英文部分的截图。
+
 ### 这是什么
 
 一个多智能体辩论产品。你带着一个拿不定主意的问题来（比如"该不该辞职去读博"），系统先把它立成二选一的辩题，你从 8 位历史人物（尼采、马基雅维利、乔布斯、波伏娃、芒格、苏轼、拿破仑、马克思）里选 3 位，他们当面辩论，你随时可以插话。最后生成一张**裁决卡**：谁站哪边、凭哪句本场原话、什么能让他改主意。中英双语。
@@ -124,7 +131,8 @@ For real debates, set `CLAUDE_API_KEY` in your Vercel project's environment vari
 
 ### 技术要点
 
-- 前端 React + Vite + TypeScript + Tailwind；后端单个 Vercel Function，无状态，前端每轮带完整上下文请求。
+- 界面设计与前端初版用 **Kimi Design** 设计生成，之后在代码里迭代；v3 新增的立题页、立场标签、裁决卡沿用同一套视觉语言手写扩展。
+- 前端 React 19 + Vite + TypeScript + Tailwind（shadcn/ui）；后端单个 Vercel Function，无状态，前端每轮带完整上下文请求。
 - 模型：Claude（Anthropic Messages API），结构化 JSON 输出 + 容错解析（空输出、截断都会重试或兜底）。
 - 人物卡即产品：中文 `characters/*.json`、英文 `characters/en/*.json`，同一套字段；英文卡按英文语感重写，不是逐句翻译。
 - 双语：`src/lib/i18n.tsx`（英文字典由类型强制覆盖全部 key）+ `api/_prompts.js`（两套提示词，同一个 JSON 契约）。

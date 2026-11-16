@@ -33,13 +33,21 @@ export default function ClosingScreen({ motion, chars, result, onRestart }: Prop
     return out
   }, [chars, verdictMap, lang])
 
+  // 计票标题：三类立场都算进去，按人数从多到少列出（"有条件"也是一种结论，不能漏掉）
   const headline = (() => {
-    const a = tally.A.length
-    const b = tally.B.length
-    if (a === 3 || b === 3) return t('closing.unanimous', { side: sl(a === 3 ? 'A' : 'B') })
-    if (a > b) return t('closing.leans', { x: a, y: b, side: motion.a })
-    if (b > a) return t('closing.leans', { x: b, y: a, side: motion.b })
-    return t('closing.tie')
+    const groups = (['A', 'B', 'MIXED'] as Stance[])
+      .map((s) => ({ s, n: tally[s].length }))
+      .filter((g) => g.n > 0)
+      .sort((x, y) => y.n - x.n)
+    if (groups.length === 1 && groups[0].n === chars.length) {
+      return groups[0].s === 'MIXED' ? t('closing.allConditional') : t('closing.unanimous', { side: sl(groups[0].s) })
+    }
+    if (groups.length === 2 && groups[0].s !== 'MIXED' && groups[1].s !== 'MIXED' && groups[0].n === groups[1].n) {
+      return t('closing.tie')
+    }
+    return groups
+      .map((g) => (g.s === 'MIXED' ? t('closing.countConditional', { n: g.n }) : t('closing.countFor', { n: g.n, side: sl(g.s) })))
+      .join(' · ')
   })()
 
   const savePng = async () => {
@@ -63,6 +71,15 @@ export default function ClosingScreen({ motion, chars, result, onRestart }: Prop
         style={{ background: STANCE_COLOR[s] }}
       >
         {sl(s)}
+      </span>
+    ) : null
+
+  // 分享卡专用：html2canvas 导出时，小色块里的文字会被画偏、被色块边界截掉。
+  // 所以导出卡上不用"色块+白字"，改成"色方块 + 同色文字"，画出来的位置不依赖文字基线
+  const CardStance = ({ s }: { s: Stance | null | undefined }) =>
+    s ? (
+      <span className="font-mono-lc text-[10px] font-bold whitespace-nowrap" style={{ color: STANCE_COLOR[s] }}>
+        ■ {sl(s)}
       </span>
     ) : null
 
@@ -160,13 +177,15 @@ export default function ClosingScreen({ motion, chars, result, onRestart }: Prop
                     <img src={c.avatar} alt={nm(c)} className="pixelated w-full h-full object-cover" />
                   </div>
                   <div className="min-w-0">
-                    <div className="flex items-center gap-1.5">
-                      <span className="font-bold text-xs" style={{ color: c.color }}>
+                    <div className="flex items-center gap-1.5 flex-wrap" style={{ minHeight: 18 }}>
+                      <span className="font-bold text-xs" style={{ color: c.color, lineHeight: '16px' }}>
                         {nm(c)}
                       </span>
-                      <Chip s={verdictMap.get(c.id)?.stance} />
+                      <CardStance s={verdictMap.get(c.id)?.stance} />
                     </div>
-                    <div className="font-pixel-cn text-xs line-clamp-2">{getAdvice(c)}</div>
+                    <div className="font-pixel-cn text-xs mt-0.5" style={{ lineHeight: 1.6 }}>
+                      {getAdvice(c)}
+                    </div>
                   </div>
                 </div>
               ))}

@@ -5,17 +5,19 @@
 
 ## 1. 产品一句话
 
-用户写下一个人生问题，3 位历史名人的"电子灵魂"（从 8 位固定人物卡中选出）围坐圆桌为其辩论，用户全程可插话/终止，结束后生成结辩高光分享卡。
+用户写下一个人生问题，先立成二选一的辩题，3 位历史名人的"电子灵魂"（从 8 位固定人物卡中选出）围坐圆桌为其辩论，用户全程可插话/终止，按内容判定结束，最后生成裁决卡。中英双语。
 
 ## 2. 技术栈（不要偏离，除非用户明确要求换）
 
-- 前端：React + Vite + TypeScript + Tailwind
-- 后端：Vercel Functions（或 Cloudflare Workers），仅 1 个接口 `POST /api/debate`，SSE 流式返回
-- LLM：OpenAI 兼容协议，主力 DeepSeek，调试期可用 GLM-4.7-Flash，备选升级 Claude
+- 界面设计与前端初版：用 **Kimi Design** 设计并生成，之后在代码里迭代（立题页、立场标签、裁决卡等 v3 之后的界面是在此基础上手写扩展的，沿用同一套视觉语言）
+- 前端：React 19 + Vite + TypeScript + Tailwind CSS（带 shadcn/ui 组件库）
+- 后端：Vercel Functions，仅 1 个接口 `POST /api/debate`，按轮次请求的普通 JSON（无状态，不是 SSE）
+- LLM：Claude（Anthropic Messages API），Key 走服务端环境变量 `CLAUDE_API_KEY`；本地无 key 时用 `MOCK_LLM=1` 假模型
+- 双语：自写 i18n 字典（`src/lib/i18n.tsx`）+ 中英两套人物卡和提示词，不依赖第三方 i18n 库
 - 分享卡导出：html2canvas（纯前端）
 - 数据库：无。无账号体系，session 结束即清空
-- 字体：标题 Press Start 2P；正文 Space Grotesk；系统提示/标签 Space Mono
-- 配色：深空底 `#0B0616 → #150A2E` 渐变；霓虹紫 `#9D4EF6`、品红 `#FF2EC9`、青 `#00F0FF`
+- 字体：中英像素标题/台词 Fusion Pixel；英文像素点缀 Press Start 2P；正文 Space Grotesk；系统提示/标签 Space Mono
+- 配色：象牙白纸底 `#f1ead9` + 墨黑描边 `#221f1a` + 硬投影的像素卡片；朱红 `#be3e2d`、群青 `#2f4f9e`、赭石 `#c08f3e`、英式绿 `#4c7a5c`。立场配色固定：A = 群青，B = 英式绿，有条件 = 赭石（刻意避开嘉宾自己的主色）
 
 ## 3. 不可违反的三条设计原则
 
